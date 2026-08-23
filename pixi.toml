@@ -9,7 +9,8 @@
 #   pixi run test            # 离线测试（pytest）
 #   pixi run -e mlx list-engines
 #   pixi run -e dots list-engines
-#   pixi run download-glm    # 需模型下载（modelscope）
+#   pixi run -e tools download-glm    # 需模型下载（modelscope）
+#   pixi run -e tools render-pdf      # PDF → 页面图片（pymupdf）
 
 [workspace]
 name = "unified-ocr"
@@ -63,6 +64,15 @@ transformers = "==4.56.1"
 qwen-vl-utils = "*"
 
 # ---------------------------------------------------------------------------
+# 工具（PDF 渲染 / 模型权重下载）—— 仓库自带辅助脚本所需
+# pymupdf: render_pdf.py（PDF → 页面图片）
+# modelscope: download_*.py（HuggingFace 不可达时的权重镜像下载）
+# ---------------------------------------------------------------------------
+[feature.tools.pypi-dependencies]
+pymupdf = "*"
+modelscope = "*"
+
+# ---------------------------------------------------------------------------
 # 开发 / 测试
 # ---------------------------------------------------------------------------
 [feature.dev.pypi-dependencies]
@@ -76,12 +86,20 @@ mlx = ["mlx"]
 hunyuan = ["hunyuan"]
 dots = ["dots"]
 dev = ["dev"]
+tools = ["tools"]
 
 # ---------------------------------------------------------------------------
 # 任务
 # ---------------------------------------------------------------------------
 [tasks]
 list-engines = "unified-ocr list-engines"
+
+# 工具任务（需 tools 环境: pixi run -e tools download-glm 等）
+[feature.tools.tasks]
+download-glm = "python download_glm.py"
+download-hunyuan = "python download_hunyuan.py"
+download-paddle = "python download_paddle.py"
+render-pdf = "python render_pdf.py"
 
 # 离线测试需要 pytest（dev 特性），运行: pixi run -e dev test
 [feature.dev.tasks]

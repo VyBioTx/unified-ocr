@@ -57,6 +57,9 @@ pixi install -e dots      # torch + transformers==4.56.1 + qwen-vl-utils
 
 # 5. 开发 / 测试环境
 pixi install -e dev
+
+# 6. 工具环境（PDF 渲染 / 模型权重下载，可选）
+pixi install -e tools    # pymupdf + modelscope
 ```
 
 > 每个引擎对应 `pixi.toml` 里的一个 feature / environment；引擎依赖均延迟
@@ -68,11 +71,10 @@ pixi install -e dev
 GLM-OCR 在 ModelScope 的官方仓库是 `ZhipuAI/GLM-OCR`（非 zai-org）。
 
 ```bash
-pip install modelscope
-
-python download_paddle.py    # PaddlePaddle/PaddleOCR-VL   → models/PaddleOCR-VL  (2.2GB)
-python download_hunyuan.py   # Tencent-Hunyuan/HunyuanOCR  → models/HunyuanOCR     (2.0GB)
-python download_glm.py       # ZhipuAI/GLM-OCR            → models/GLM-OCR        (2.65GB)
+# 或使用 pixi（tools 环境含 modelscope）：
+pixi run -e tools download-paddle    # PaddlePaddle/PaddleOCR-VL   → models/PaddleOCR-VL  (2.2GB)
+pixi run -e tools download-hunyuan   # Tencent-Hunyuan/HunyuanOCR  → models/HunyuanOCR     (2.0GB)
+pixi run -e tools download-glm       # ZhipuAI/GLM-OCR            → models/GLM-OCR        (2.65GB)
 ```
 
 > HuggingFace 直连可用时，等价权重 id：`PaddlePaddle/PaddleOCR-VL`、
