@@ -17,8 +17,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from ..base import EngineSpec, OCRBackend
 from ..models import OCRResult
 from ..registry import register
@@ -79,6 +77,7 @@ class HunyuanTransformersBackend(OCRBackend):
         if self._loaded:
             return self
         try:
+            import torch
             from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
         except ImportError as exc:  # pragma: no cover - 依赖缺失路径
             raise RuntimeError(
@@ -129,6 +128,8 @@ class HunyuanTransformersBackend(OCRBackend):
         )
         device = next(self._model.parameters()).device
         inputs = inputs.to(device)
+        import torch
+
         with torch.no_grad():
             generated_ids = self._model.generate(
                 **inputs, max_new_tokens=int(max_new_tokens), do_sample=False

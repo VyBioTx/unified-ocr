@@ -27,7 +27,8 @@ log = logging.getLogger("unified_ocr")
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="unified-ocr",
-        description="统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR 的 macOS 统一 OCR 框架（MLX）。",
+        description="统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR / dots.mocr 的 "
+                    "macOS 统一 OCR 框架（MLX / MPS）。",
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
@@ -42,7 +43,8 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("image", help="图像路径（jpg/png/pdf 页等）")
     eng = r.add_mutually_exclusive_group(required=True)
     eng.add_argument("-e", "--engine", action="append", dest="engines",
-                     help="引擎 id，可重复（glm-ocr / paddleocr-vl / hunyuanocr）")
+                     help="引擎 id，可重复（glm-ocr / paddleocr-vl / hunyuanocr / "
+                          "dots-mocr / dots-mocr-mlx）")
     eng.add_argument("--all", action="store_true", help="运行所有已注册引擎")
     r.add_argument("-o", "--output", choices=["text", "json", "markdown"], default="text")
     r.add_argument("--model", action="append", default=[], metavar="ENGINE=PATH",

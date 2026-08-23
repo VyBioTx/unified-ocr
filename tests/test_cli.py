@@ -8,6 +8,7 @@ import unified_ocr
 from unified_ocr import OCR, registry
 from unified_ocr.base import EngineSpec, OCRBackend
 from unified_ocr.models import OCRResult
+from unified_ocr.registry import has_engine
 
 
 class FakeBackend(OCRBackend):
@@ -37,6 +38,15 @@ def register_fake():
 def test_registry_lists_three_real_engines():
     ids = {s.id for s in registry.list_engines()}
     assert {"glm-ocr", "paddleocr-vl", "hunyuanocr"} <= ids
+
+
+def test_registry_lists_dots_engines():
+    """dots.mocr 的 transformers(MPS) 与 MLX 引擎均已注册并可见。"""
+    ids = {s.id for s in registry.list_engines()}
+    assert "dots-mocr" in ids
+    assert "dots-mocr-mlx" in ids
+    assert has_engine("dots-mocr")
+    assert has_engine("dots-mocr-mlx")
 
 
 def test_ocr_facade_runs_multiple_engines(tmp_path, monkeypatch):

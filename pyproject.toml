@@ -28,6 +28,13 @@ hunyuan = [
     "transformers>=5.0",
     "accelerate>=0.30",
 ]
+# dots.mocr 引擎（transformers 原生推理，Apple Silicon 走 MPS/CPU）。
+# 版本建议与 dots 官方锁定一致（requirements.txt：transformers==4.56.1）。
+dots = [
+    "torch>=2.0",
+    "transformers==4.56.1",
+    "qwen-vl-utils",
+]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
