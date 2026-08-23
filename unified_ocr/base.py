@@ -22,7 +22,7 @@ class EngineSpec:
     id: str                    # CLI 中使用的引擎标识，如 "glm-ocr"
     display_name: str          # 展示名，如 "GLM-OCR (mlx-vlm)"
     model_hint: str            # 默认模型路径 / HF id 提示
-    accelerator: str           # "MLX (Metal)" / "Metal via llama.cpp" / "CPU"
+    accelerator: str           # "MLX (Metal)" / "MPS (Metal) via PyTorch" / "CPU"
     license: str = "unknown"   # 模型 / 仓库许可证
     repo: str = ""             # 上游开源仓库 URL
     requires_gguf: bool = False

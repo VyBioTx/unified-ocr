@@ -64,7 +64,7 @@ class OCR:
             image: 图像路径或 PIL.Image / numpy 数组。
             engines: 引擎 id 或 id 列表；默认 mlx-vlm 两引擎（无需 GGUF）。
             engine_options: 透传给每个后端构造器的关键字参数
-                （如 model=、prompt=、mmproj=）。按引擎分别传参时，可用
+                （如 model=、prompt=、max_tokens=）。按引擎分别传参时，可用
                 形如 {"glm-ocr": {...}} 的嵌套 dict（见 ``run_mapped``）。
         """
         if isinstance(engines, str):

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR 的 macOS 统一 OCR 框架（MLX）"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 dependencies = [
     "Pillow>=10.0",
 ]
@@ -19,12 +19,14 @@ dependencies = [
 mlx = [
     "mlx>=0.19",
     "mlx-lm>=0.19",
-    "transformers>=4.45",
+    "transformers>=5.0",
     "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@main",
 ]
-# HunyuanOCR 引擎（llama.cpp GGUF，Metal 加速）
+# HunyuanOCR 引擎（transformers 原生推理，Apple Silicon 走 MPS）
 hunyuan = [
-    "llama-cpp-python>=0.3.0",
+    "torch>=2.0",
+    "transformers>=5.0",
+    "accelerate>=0.30",
 ]
 dev = ["pytest>=8.0"]
 

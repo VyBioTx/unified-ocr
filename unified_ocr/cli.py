@@ -6,8 +6,7 @@
     unified-ocr run scan.png -e glm-ocr
     unified-ocr run scan.png --all -o json
     unified-ocr run scan.png -e hunyuanocr \\
-        --model hunyuanocr=~/models/HunyuanOCR-1.0-Q4_K_M.gguf \\
-        --mmproj hunyuanocr=~/models/mmproj-hunyuanocr-f16.gguf
+        --model hunyuanocr=~/models/HunyuanOCR
 """
 
 from __future__ import annotations
@@ -48,8 +47,6 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("-o", "--output", choices=["text", "json", "markdown"], default="text")
     r.add_argument("--model", action="append", default=[], metavar="ENGINE=PATH",
                    help="覆盖某引擎的模型路径，如 --model glm-ocr=mlx-community/GLM-OCR-bf16")
-    r.add_argument("--mmproj", action="append", default=[], metavar="ENGINE=PATH",
-                   help="hunyuanocr 的视觉投影文件，如 --mmproj hunyuanocr=~/mmproj.gguf")
     r.add_argument("--prompt", default=None, help="覆盖默认识别提示词")
     r.add_argument("--max-tokens", type=int, default=None)
     return p
@@ -73,12 +70,9 @@ def _resolve_engines(args: argparse.Namespace) -> list[str]:
 
 def _engine_options(args: argparse.Namespace, engine_id: str) -> dict[str, Any]:
     models = _parse_kv(args.model, "--model")
-    mmprojs = _parse_kv(args.mmproj, "--mmproj")
     opts: dict[str, Any] = {}
     if engine_id in models:
         opts["model"] = models[engine_id]
-    if engine_id in mmprojs:
-        opts["mmproj"] = mmprojs[engine_id]
     if args.prompt:
         opts["prompt"] = args.prompt
     if args.max_tokens:
@@ -96,7 +90,7 @@ def _run(args: argparse.Namespace) -> int:
         try:
             backend = create_backend(engine_id, **_engine_options(args, engine_id))
         except ValueError as exc:
-            # 例如 hunyuanocr 缺少 mmproj —— 构造期失败
+            # 构造期失败（如后端参数缺失）
             print(f"跳过 {engine_id}: {exc}", file=sys.stderr)
             continue
         try:
