@@ -1,0 +1,88 @@
+# pixi 项目清单 —— unified-ocr 的依赖管理（自 pyproject.toml 迁移）
+#
+# 说明：
+# - pyproject.toml 仅保留 Python 打包元数据（setuptools 构建、CLI 入口、包发现）。
+# - 依赖（conda + PyPI）、特性（引擎可选组）、环境组合与任务全部由本文件管理。
+# - 各引擎依赖均为延迟 import，默认环境只需核心依赖即可离线运行（list-engines / 测试）。
+#
+# 用法:
+#   pixi run test            # 离线测试（pytest）
+#   pixi run -e mlx list-engines
+#   pixi run -e dots list-engines
+#   pixi run download-glm    # 需模型下载（modelscope）
+
+[workspace]
+name = "unified-ocr"
+version = "0.1.0"
+description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR / dots.mocr 的 macOS 统一 OCR 框架（MLX / MPS）"
+authors = ["Silen Wang <qiumin14@163.com>"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+# macOS 最低版本：mlx>=0.32（mlx-vlm@main 依赖）仅提供 macOS 14+ 的 wheel。
+[system-requirements]
+macos = "14.0"
+
+# ---------------------------------------------------------------------------
+# 核心依赖（默认环境，模型无关）
+# ---------------------------------------------------------------------------
+[dependencies]
+python = ">=3.10,<3.13"
+pillow = ">=10.0"
+
+# 本包以 editable 方式装入环境，提供 unified-ocr CLI 入口
+# （对应 pyproject.toml 的 [project.scripts]）
+[pypi-dependencies]
+unified-ocr = { path = ".", editable = true }
+
+# ---------------------------------------------------------------------------
+# MLX 引擎（glm-ocr / paddleocr-vl）—— 对应原 pyproject 的 optional-dependencies["mlx"]
+# mlx-vlm 必须从 git 安装：PyPI 版尚未包含 GLM-OCR / PaddleOCR-VL 架构。
+# ---------------------------------------------------------------------------
+[feature.mlx.pypi-dependencies]
+mlx = ">=0.19"
+mlx-lm = ">=0.19"
+transformers = ">=5.0"
+mlx-vlm = { git = "https://github.com/Blaizzy/mlx-vlm.git", rev = "main" }
+
+# ---------------------------------------------------------------------------
+# HunyuanOCR 引擎（transformers 原生推理，Apple Silicon 走 MPS）
+# ---------------------------------------------------------------------------
+[feature.hunyuan.pypi-dependencies]
+torch = ">=2.0"
+transformers = ">=5.0"
+accelerate = ">=0.30"
+
+# ---------------------------------------------------------------------------
+# dots.mocr 引擎（transformers 原生推理，Apple Silicon 走 MPS/CPU）
+# 版本建议与 dots 官方锁定一致（requirements.txt：transformers==4.56.1）。
+# ---------------------------------------------------------------------------
+[feature.dots.pypi-dependencies]
+torch = ">=2.0"
+transformers = "==4.56.1"
+qwen-vl-utils = "*"
+
+# ---------------------------------------------------------------------------
+# 开发 / 测试
+# ---------------------------------------------------------------------------
+[feature.dev.pypi-dependencies]
+pytest = ">=8.0"
+
+# ---------------------------------------------------------------------------
+# 环境组合（默认环境自动包含顶层 [dependencies]/[pypi-dependencies]）
+# ---------------------------------------------------------------------------
+[environments]
+mlx = ["mlx"]
+hunyuan = ["hunyuan"]
+dots = ["dots"]
+dev = ["dev"]
+
+# ---------------------------------------------------------------------------
+# 任务
+# ---------------------------------------------------------------------------
+[tasks]
+list-engines = "unified-ocr list-engines"
+
+# 离线测试需要 pytest（dev 特性），运行: pixi run -e dev test
+[feature.dev.tasks]
+test = "pytest -q"

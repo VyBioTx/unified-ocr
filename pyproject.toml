@@ -5,30 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "unified-ocr"
 version = "0.1.0"
-description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR 的 macOS 统一 OCR 框架（MLX）"
+description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR / dots.mocr 的 macOS 统一 OCR 框架（MLX / MPS）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = [
-    "Pillow>=10.0",
-]
-
-[project.optional-dependencies]
-# MLX 引擎（glm-ocr / paddleocr-vl）。mlx-vlm 必须从 git 安装：
-# PyPI 版本尚未包含 GLM-OCR / PaddleOCR-VL 架构。
-mlx = [
-    "mlx>=0.19",
-    "mlx-lm>=0.19",
-    "transformers>=5.0",
-    "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@main",
-]
-# HunyuanOCR 引擎（transformers 原生推理，Apple Silicon 走 MPS）
-hunyuan = [
-    "torch>=2.0",
-    "transformers>=5.0",
-    "accelerate>=0.30",
-]
-dev = ["pytest>=8.0"]
+# 依赖已迁移至 pixi.toml 统一管理（conda + PyPI / feature / environment），
+# 本文件仅保留 Python 打包所需的构建元数据。
 
 [project.scripts]
 unified-ocr = "unified_ocr.cli:main"
