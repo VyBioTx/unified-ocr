@@ -36,6 +36,13 @@ dots = [
     "qwen-vl-utils",
 ]
 dev = ["pytest>=8.0"]
+# 专利表格 OCR（PP-StructureV3 表格识别专用链）
+# 基于 PaddleOCR 的经典表格识别流水线（非 VLM 模式），
+# 用于从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+patent = [
+    "paddleocr>=2.9",
+    "lxml",
+]
 
 [project.scripts]
 unified-ocr = "unified_ocr.cli:main"
