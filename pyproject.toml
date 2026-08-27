@@ -11,6 +11,15 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 # 依赖已迁移至 pixi.toml 统一管理（conda + PyPI / feature / environment），
 # 本文件仅保留 Python 打包所需的构建元数据。
+# 专利表格 OCR 所需的标准库依赖通过 pixi 管理；
+# Linux GPU 用户可通过 pip install -e ".[patent-gpu]" 安装 GPU 版本。
+[project.optional-dependencies]
+patent-gpu = [
+    "paddleocr>=3.0",
+    "paddlex[ocr]>=3.0",
+    "lxml",
+    "pymupdf",
+]
 
 [project.scripts]
 unified-ocr = "unified_ocr.cli:main"
