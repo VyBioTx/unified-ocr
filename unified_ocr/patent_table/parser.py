@@ -113,21 +113,23 @@ def _parse_via_lxml(table: Any) -> TableStructure:
     from lxml import etree
 
     rows: list[TableRow] = []
-    for tr in table.findall(".//tr"):
+    for row_idx, tr in enumerate(table.findall(".//tr")):
         cells: list[TableCell] = []
-        for td in tr.findall("td"):
+        for col_idx, td in enumerate(tr.findall("td")):
             text = _extract_text(td)
             rowspan = int(td.get("rowspan", 1))
             colspan = int(td.get("colspan", 1))
             cells.append(TableCell(
-                text=text, rowspan=rowspan, colspan=colspan,
+                text=text, row=row_idx, col=col_idx,
+                rowspan=rowspan, colspan=colspan,
             ))
-        for th in tr.findall("th"):
+        for col_idx, th in enumerate(tr.findall("th")):
             text = _extract_text(th)
             rowspan = int(th.get("rowspan", 1))
             colspan = int(th.get("colspan", 1))
             cells.append(TableCell(
-                text=text, rowspan=rowspan, colspan=colspan,
+                text=text, row=row_idx, col=len(cells),
+                rowspan=rowspan, colspan=colspan,
             ))
         if cells:
             rows.append(TableRow(cells=cells))
