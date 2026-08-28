@@ -19,7 +19,8 @@ from unified_ocr.patent_table.qc import QCFilter, QCSpec
 def test_list_available_models():
     models = list_available_models()
     components = {m["component"] for m in models}
-    assert components == {"det", "table", "rec"}
+    assert {"det", "table", "rec"} <= components
+    assert "layout" in components
 
 
 def test_pipeline_config_defaults():
@@ -34,9 +35,65 @@ def test_pipeline_config_defaults():
 def test_pipeline_config_to_kwargs():
     cfg = PatentTablePipelineConfig(det_db_unclip_ratio=1.5)
     kwargs = cfg.to_paddleocr_kwargs()
-    assert kwargs["det_limit_side_len"] == 3000
-    assert kwargs["det_db_unclip_ratio"] == 1.5
+    assert kwargs["text_det_limit_side_len"] == 3000
+    assert kwargs["text_det_unclip_ratio"] == 1.5
     assert kwargs["lang"] == "en"
+    assert kwargs["use_table_recognition"] is True
+    assert kwargs["use_doc_orientation_classify"] is False
+
+
+def test_pipeline_config_device():
+    # 显式 GPU
+    cfg = PatentTablePipelineConfig(device="gpu:0")
+    assert cfg.to_paddleocr_kwargs()["device"] == "gpu:0"
+    # 旧版 use_gpu 映射
+    cfg2 = PatentTablePipelineConfig(use_gpu=True)
+    assert cfg2.device == "gpu:0"
+    assert cfg2.to_paddleocr_kwargs()["device"] == "gpu:0"
+    cfg3 = PatentTablePipelineConfig(use_gpu=False)
+    assert cfg3.device == "cpu"
+    # 默认 None → 不传 device（PaddleX 自动选择）
+    cfg4 = PatentTablePipelineConfig()
+    assert "device" not in cfg4.to_paddleocr_kwargs()
+
+
+def test_page_result_defaults():
+    from unified_ocr.patent_table.pipeline import PageResult
+    pr = PageResult()
+    assert pr.markdown == ""
+    assert pr.tables == []
+    assert pr.page_index == 1
+    assert pr.seconds == 0.0
+
+
+def test_parse_page_result_from_dict_like():
+    """验证 _parse_page_result 能从 PaddleX 结果对象提取 markdown + 表格。"""
+    from unified_ocr.patent_table.pipeline import PatentTablePipeline
+
+    class FakeTable(dict):
+        def __init__(self, html):
+            super().__init__(pred_html=html)
+
+    class FakeItem(dict):
+        markdown = {"markdown_texts": "# 标题\n正文内容"}
+
+    class FakeResult(list):
+        pass
+
+    item = FakeItem()
+    item["table_res_list"] = [FakeTable("<table><tr><td>A</td></tr></table>")]
+    item["width"] = 100
+    item["height"] = 200
+
+    pipe = PatentTablePipeline()
+    page = pipe._parse_page_result(FakeResult([item]), page_index=3, seconds=1.5)
+    assert page.page_index == 3
+    assert page.seconds == 1.5
+    assert "标题" in page.markdown
+    assert len(page.tables) == 1
+    assert "<table>" in page.tables[0]
+    assert page.width == 100
+    assert page.height == 200
 
 
 SAMPLE_TABLE_HTML = """
@@ -183,4 +240,4 @@ def test_cli_download():
     from unified_ocr.patent_table.cli import main
     # 不实际下载，仅测试参数解析
     models = list_available_models()
-    assert len(models) == 3
+    assert len(models) >= 3

@@ -26,11 +26,14 @@ log = logging.getLogger(__name__)
 # 默认模型权重下载根目录
 DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
-# PaddleOCR 模型名称（对应 PaddleOCR 内部模型映射表的 key）
+# PaddleOCR 模型名称（3.x 由 PaddleX 自动下载至 ~/.paddlex/official_models/）
+# PP-StructureV3 实际加载（见 README）：
+#   PP-DocLayout_plus-L 版面分析 + PP-OCRv5_server_det/rec 整页 OCR
+#   + RT-DETR-L（有线/无线）表格单元格检测 + SLANeXt 表格结构识别
 MODEL_NAMES: dict[str, dict[str, str]] = {
-    "det": {"model": "RT-DETR-L", "url": "RT-DETR-L"},
-    "table": {"model": "SLANeXt", "url": "SLANeXt"},
-    "rec": {"model": "PP-OCRv4_mobile_rec", "url": "en_PP-OCRv4_mobile_rec"},
+    "det": {"model": "RT-DETR-L_wired_table_cell_det", "url": "RT-DETR-L"},
+    "table": {"model": "SLANeXt_wired", "url": "SLANeXt"},
+    "rec": {"model": "PP-OCRv5_server_rec", "url": "PP-OCRv5_server_rec"},
 }
 
 
@@ -39,7 +42,11 @@ def download_weights(
     components: list[str] | None = None,
     use_paddleocr_download: bool = True,
 ) -> dict[str, Path]:
-    """下载 PP-StructureV3 三件套权重到本地。
+    """准备 PP-StructureV3 权重。
+
+    paddleocr 3.x 中，PP-StructureV3 的全部模型权重由 PaddleX 在
+    首次实例化时自动下载至 ~/.paddlex/official_models/，无需手工拉取。
+    本函数用于显式准备目录结构 / 触发下载。
 
     Args:
         model_dir: 下载目标目录，默认 unified-ocr/models/。
@@ -124,12 +131,14 @@ def _download_via_paddleocr(
 def list_available_models() -> list[dict[str, str]]:
     """列出本模块支持的所有模型及其信息。"""
     return [
+        {"component": "layout", "name": "PP-DocLayout_plus-L", "version": "latest",
+         "description": "版面分析（text/table/title 块）"},
         {"component": "det", "name": "RT-DETR-L", "version": "latest",
          "description": "表格单元格检测模型"},
         {"component": "table", "name": "SLANeXt", "version": "latest",
          "description": "表格结构识别模型"},
-        {"component": "rec", "name": "PP-OCRv4_mobile_rec (en/uppercase)", "version": "latest",
-         "description": "英文大写文本识别模型（专利文本专用）"},
+        {"component": "rec", "name": "PP-OCRv5_server_rec (en)", "version": "latest",
+         "description": "整页文字识别模型（含正文段落）"},
     ]
 
 

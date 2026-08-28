@@ -52,12 +52,33 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list-models", help="列出支持的模型")
 
     # --- run ---
-    r = sub.add_parser("run", help="对图像运行表格识别，输出 HTML")
+    r = sub.add_parser("run", help="对图像运行 PP-StructureV3，输出整页 markdown + 表格 HTML")
     r.add_argument("image", help="图像路径（PNG/JPEG，建议 3000px+）")
     r.add_argument("-o", "--output", help="输出 JSON 文件路径（默认输出到终端）")
     r.add_argument("--unclip", type=float, default=2.0, choices=[1.5, 2.0],
                    help="det_db_unclip_ratio（1.5 或 2.0）")
+    r.add_argument("--device", default=None,
+                   help="推理设备：gpu:0 / gpu / cpu（默认 auto）")
+    r.add_argument("--side-len", type=int, default=3000,
+                   help="text_det_limit_side_len（默认 3000）")
+    r.add_argument("--gpu-mem-mb", type=int, default=None,
+                   help="paddle GPU 显存上限（MB），显存紧张时设置")
     r.add_argument("--model-dir", help="模型权重目录")
+
+    # --- pdf ---
+    pdf = sub.add_parser("pdf", help="对 PDF 逐页运行 PP-StructureV3（GPU 批量）")
+    pdf.add_argument("pdf", help="PDF 文件路径")
+    pdf.add_argument("-o", "--output-dir", default="patent_pdf_result",
+                     help="输出目录（每页一个 JSON + 汇总 summary.json）")
+    pdf.add_argument("--dpi", type=int, default=300,
+                     help="PDF 渲染 DPI（默认 300）")
+    pdf.add_argument("--unclip", type=float, default=2.0, choices=[1.5, 2.0])
+    pdf.add_argument("--device", default=None,
+                     help="推理设备：gpu:0 / gpu / cpu（默认 auto）")
+    pdf.add_argument("--side-len", type=int, default=3000)
+    pdf.add_argument("--gpu-mem-mb", type=int, default=None)
+    pdf.add_argument("--pages", default=None,
+                     help="要处理的页码，逗号分隔 1-based（默认全部）")
 
     # --- full ---
     f = sub.add_parser("full", help="完整流程：识别 → 解析 → QC → 合并")
@@ -65,6 +86,10 @@ def _build_parser() -> argparse.ArgumentParser:
     f.add_argument("-o", "--output", default="patent_result.json",
                    help="输出 JSON 文件路径")
     f.add_argument("--unclip", type=float, default=2.0, choices=[1.5, 2.0])
+    f.add_argument("--device", default=None,
+                   help="推理设备：gpu:0 / gpu / cpu（默认 auto）")
+    f.add_argument("--side-len", type=int, default=3000)
+    f.add_argument("--gpu-mem-mb", type=int, default=None)
     f.add_argument("--model-dir", help="模型权重目录")
     f.add_argument("--min-seq-len", type=int, default=16,
                    help="QC: 最小序列长度（默认 16）")
@@ -93,6 +118,9 @@ def _cmd_list_models() -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     config = PatentTablePipelineConfig(
         det_db_unclip_ratio=args.unclip,
+        det_limit_side_len=args.side_len,
+        device=args.device,
+        gpu_memory_limit_mb=args.gpu_mem_mb,
     )
     if args.model_dir:
         config.table_model = str(Path(args.model_dir) / "table")
@@ -100,19 +128,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     pipe = PatentTablePipeline(config)
     try:
-        tables = pipe.process(args.image)
+        page = pipe.process_page(args.image)
     finally:
         pipe.close()
 
-    result = []
-    for i, table in enumerate(tables):
-        html = table.get("html", "")
-        ts = parse_html_table(html)
-        result.append({
-            "index": i,
-            "html": html,
-            "structure": ts.to_dicts() if ts else None,
-        })
+    result = {
+        "page": str(args.image),
+        "seconds": page.seconds,
+        "n_tables": len(page.tables),
+        "markdown": page.markdown,
+        "tables": [
+            {
+                "index": i,
+                "html": html,
+                "structure": (parse_html_table(html).to_dicts()
+                              if parse_html_table(html) else None),
+            }
+            for i, html in enumerate(page.tables)
+        ],
+    }
 
     if args.output:
         Path(args.output).write_text(
@@ -124,9 +158,92 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_pdf(args: argparse.Namespace) -> int:
+    """对 PDF 逐页运行 PP-StructureV3，输出每页 JSON + summary。"""
+    import time
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        print("需要 pymupdf：pip install pymupdf", file=sys.stderr)
+        return 1
+
+    config = PatentTablePipelineConfig(
+        det_db_unclip_ratio=args.unclip,
+        det_limit_side_len=args.side_len,
+        device=args.device,
+        gpu_memory_limit_mb=args.gpu_mem_mb,
+    )
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 渲染 PDF → 页面图片
+    doc = fitz.open(args.pdf)
+    n_pages = doc.page_count
+    wanted = None
+    if args.pages:
+        wanted = {int(x) for x in args.pages.split(",") if x.strip()}
+    print(f"PDF 共 {n_pages} 页，渲染 DPI={args.dpi} ...", flush=True)
+    page_images: list[tuple[int, Path]] = []
+    for i in range(n_pages):
+        if wanted is not None and (i + 1) not in wanted:
+            continue
+        pix = doc[i].get_pixmap(dpi=args.dpi)
+        png = out_dir / f"page_{i + 1:02d}.png"
+        pix.save(png)
+        page_images.append((i + 1, png))
+        print(f"  渲染 page_{i + 1:02d} ({pix.width}x{pix.height})", flush=True)
+    doc.close()
+
+    t0 = time.time()
+    print(f"初始化 PP-StructureV3（device={config.device or 'auto'}）...", flush=True)
+    pipe = PatentTablePipeline(config)
+    summary = []
+    try:
+        for page_idx, png in page_images:
+            t1 = time.time()
+            print(f"==> page_{page_idx:02d} ...", flush=True)
+            page = pipe.process_page(png, page_index=page_idx)
+            out = {
+                "page": page_idx,
+                "seconds": round(page.seconds, 1),
+                "n_tables": len(page.tables),
+                "markdown": page.markdown,
+                "tables": page.tables,
+                "width": page.width,
+                "height": page.height,
+            }
+            (out_dir / f"page_{page_idx:02d}.json").write_text(
+                json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            summary.append(out)
+            print(f"    page_{page_idx:02d}: {page.seconds:.1f}s, "
+                  f"{len(page.tables)} tables, md_len={len(page.markdown)}",
+                  flush=True)
+    finally:
+        pipe.close()
+
+    total = time.time() - t0
+    summary_out = {
+        "pdf": str(args.pdf),
+        "total_seconds": round(total, 1),
+        "device": config.device or "auto",
+        "pages": summary,
+    }
+    (out_dir / "summary.json").write_text(
+        json.dumps(summary_out, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"DONE total={total:.1f}s -> {out_dir}/summary.json", flush=True)
+    return 0
+
+
 def _cmd_full(args: argparse.Namespace) -> int:
     config = PatentTablePipelineConfig(
         det_db_unclip_ratio=args.unclip,
+        det_limit_side_len=args.side_len,
+        device=args.device,
+        gpu_memory_limit_mb=args.gpu_mem_mb,
     )
     if args.model_dir:
         config.table_model = str(Path(args.model_dir) / "table")
@@ -134,10 +251,11 @@ def _cmd_full(args: argparse.Namespace) -> int:
 
     pipe = PatentTablePipeline(config)
     try:
-        tables = pipe.process(args.image)
+        page = pipe.process_page(args.image)
     finally:
         pipe.close()
 
+    tables = [{"html": h} for h in page.tables]
     if not tables:
         print("未检测到表格", file=sys.stderr)
         return 1
@@ -191,6 +309,7 @@ def _cmd_full(args: argparse.Namespace) -> int:
         "num_tables_detected": len(tables),
         "num_sequences_found": len(merged),
         "num_sequences_passed_qc": len(filtered),
+        "markdown": page.markdown,
         "sequences": [
             {
                 "sequence": m.sequence,
@@ -226,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list_models()
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "pdf":
+        return _cmd_pdf(args)
     if args.command == "full":
         return _cmd_full(args)
     return 1

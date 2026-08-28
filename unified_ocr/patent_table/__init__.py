@@ -13,13 +13,14 @@
 from __future__ import annotations
 
 from .download_weights import download_weights
-from .pipeline import PatentTablePipeline, PatentTablePipelineConfig
+from .pipeline import PageResult, PatentTablePipeline, PatentTablePipelineConfig
 from .parser import TableCell, TableRow, TableStructure, parse_html_table
 from .qc import QCFilter, QCSpec
 from .merge import merge_sequence_knockdown
 
 __all__ = [
     "download_weights",
+    "PageResult",
     "PatentTablePipeline",
     "PatentTablePipelineConfig",
     "TableCell",

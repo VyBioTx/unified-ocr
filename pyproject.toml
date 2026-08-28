@@ -37,11 +37,22 @@ dots = [
 ]
 dev = ["pytest>=8.0"]
 # 专利表格 OCR（PP-StructureV3 表格识别专用链）
-# 基于 PaddleOCR 的经典表格识别流水线（非 VLM 模式），
+# 基于 PaddleOCR 的 PP-StructureV3 流水线（paddleocr 3.x + PaddleX），
 # 用于从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+# CPU:  pip install ".[patent]"
+# GPU:  pip install ".[patent-gpu]"   （paddlepaddle-gpu 3.3.1 来自 Paddle 官方 cu126 源）
 patent = [
-    "paddleocr>=2.9",
+    "paddleocr>=3.0",
+    "paddlex[ocr]>=3.0",
     "lxml",
+    "pymupdf",
+]
+patent-gpu = [
+    "paddleocr>=3.0",
+    "paddlex[ocr]>=3.0",
+    "lxml",
+    "pymupdf",
+    "paddlepaddle-gpu==3.3.1; platform_system == 'Linux'",
 ]
 
 [project.scripts]
