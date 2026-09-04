@@ -131,6 +131,72 @@ python batch_hunyuan_ocr.py            # → result_hunyuanocr.md（表格 HTML 
 
 > 三个引擎同时跑会触发 Metal GPU 超时（M4 Pro 实测），需顺序执行。
 
+### 专利表格 OCR（PP-StructureV3 专用链）
+
+`unified_ocr/patent_table` 模块按论文（FENNEC 2026, Methods → Data curation）
+配置 **PP-StructureV3** 流水线，从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+流水线由 PaddleX 实现：`PP-DocLayout_plus-L` 版面分析 + `PP-OCRv5` 整页 OCR
++ `RT-DETR-L` 表格单元格检测 + `SLANeXt` 表格结构识别，按论文参数运行
+（`det_limit_side_len=3000`、`thresh=0.15`、`box_thresh=0.4`、
+`unclip_ratio=1.5~2.0`、`lang=en`）。
+
+> 与论文「只出表格」的差异：`PPStructureV3` 完整输出**整页 markdown**（正文
+> 段落 + 表格 HTML），正文来自版面分析标记的 text 块 + 全页 OCR；只想要表格时
+> 消费 `PageResult.tables`（来自 `table_res_list`）即可。
+
+**安装（pixi，macOS）**：
+
+```bash
+# CPU（macOS Apple Silicon）
+pixi run -e patent patent-pdf patent.pdf -o result/
+```
+
+**安装（pip）**：
+
+```bash
+pip install -e ".[patent]"         # CPU
+pip install -e ".[patent-gpu]"     # Linux GPU（paddlepaddle-gpu 3.3.1）
+
+# GPU 运行（Linux + NVIDIA CUDA，实测 RTX 3060 每页 ~2-4s，较 CPU 快约 40 倍）
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300
+```
+
+**CLI 用法**：
+
+```bash
+# 单页图像 → 整页 markdown + 表格 HTML（JSON）
+python -m unified_ocr.patent_table run page.png -o page.json --device gpu:0
+
+# PDF 逐页批量（GPU 推荐）：每页一个 JSON + summary.json
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300 --unclip 2.0
+
+# 完整流程：识别 → 解析 → QC 过滤 → 序列×效应合并
+python -m unified_ocr.patent_table full page.png -o patent_result.json --device gpu:0
+```
+
+**Python API**：
+
+```python
+from unified_ocr.patent_table import PatentTablePipeline, PatentTablePipelineConfig
+
+pipe = PatentTablePipeline(PatentTablePipelineConfig(device="gpu:0"))
+try:
+    page = pipe.process_page("page_02.png")
+    print(page.markdown)       # 整页 markdown（正文 + 表格）
+    for html in page.tables:   # 每张表的 HTML（含 rowspan/colspan）
+        print(html)
+finally:
+    pipe.close()
+```
+
+**依赖说明**：paddlepaddle-gpu 3.3.1 不在 PyPI（PyPI 仅到 2.6.2），
+`patent-gpu` 特性通过 Paddle 官方 cu126 源安装
+（`https://www.paddlepaddle.org.cn/packages/stable/cu126/`）。
+GPU 推理显存约需 8GB（全模型 + 3000px 大图），显存紧张时
+传 `--gpu-mem-mb 5500` 或 `PatentTablePipelineConfig(gpu_memory_limit_mb=...)` 限制。
+
 ### 统一框架 Python API / CLI
 
 ```python

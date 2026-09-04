@@ -15,7 +15,7 @@
 [workspace]
 name = "unified-ocr"
 version = "0.1.0"
-description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR / dots.mocr 的 macOS 统一 OCR 框架（MLX / MPS）"
+description = "统合 PaddleOCR-VL / HunyuanOCR / GLM-OCR / dots.mocr 的 OCR 框架（macOS MLX/MPS；Linux CUDA 用 pip extra）"
 authors = ["Silen Wang <qiumin14@163.com>"]
 channels = ["conda-forge"]
 platforms = ["osx-arm64"]
@@ -73,6 +73,19 @@ pymupdf = "*"
 modelscope = "*"
 
 # ---------------------------------------------------------------------------
+# 专利表格 OCR（PP-StructureV3）—— paddleocr 3.x + PaddleX
+# 用于从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+# CPU 环境：pixi run -e patent ...
+# GPU 环境：Linux + CUDA 使用 pip extra 安装（见 README）
+#   pip install -e ".[patent-gpu]"
+# ---------------------------------------------------------------------------
+[feature.patent.pypi-dependencies]
+paddleocr = ">=3.0"
+paddlex = { version = ">=3.0", extras = ["ocr"] }
+lxml = "*"
+pymupdf = "*"
+
+# ---------------------------------------------------------------------------
 # 开发 / 测试
 # ---------------------------------------------------------------------------
 [feature.dev.pypi-dependencies]
@@ -87,6 +100,7 @@ hunyuan = ["hunyuan"]
 dots = ["dots"]
 dev = ["dev"]
 tools = ["tools"]
+patent = ["patent"]
 
 # ---------------------------------------------------------------------------
 # 任务
@@ -104,3 +118,10 @@ render-pdf = "python render_pdf.py"
 # 离线测试需要 pytest（dev 特性），运行: pixi run -e dev test
 [feature.dev.tasks]
 test = "pytest -q"
+
+# 专利表格 OCR 任务（patent 环境）
+[feature.patent.tasks]
+patent-run = "python -m unified_ocr.patent_table run"
+patent-pdf = "python -m unified_ocr.patent_table pdf"
+patent-full = "python -m unified_ocr.patent_table full"
+patent-download = "python -m unified_ocr.patent_table download"
