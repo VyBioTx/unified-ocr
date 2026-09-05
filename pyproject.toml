@@ -19,4 +19,4 @@ unified-ocr = "unified_ocr.cli:main"
 include = ["unified_ocr*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "mcp_server/tests"]

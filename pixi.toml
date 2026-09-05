@@ -73,6 +73,20 @@ pymupdf = "*"
 modelscope = "*"
 
 # ---------------------------------------------------------------------------
+# MCP server（HTTP streamable 模式，含上传 + 异步任务队列）
+# 运行: pixi run -e mcp mcp   （模型引擎依赖 mlx + hunyuan 一并装入）
+# pymupdf: MCP 任务内 PDF → 页面图片（与 tools 共用）
+# 注意: mcp 固定 1.x —— FastMCP API（mcp.server.fastmcp / streamable-http_app）
+#       在 2.0 大改（移除 fastmcp、改为 mcp_types），1.x 是稳定兼容线。
+# ---------------------------------------------------------------------------
+[feature.mcp.pypi-dependencies]
+mcp = ">=1.29,<2"
+httpx-sse = "*"
+uvicorn = "*"
+starlette = "*"
+pymupdf = "*"
+
+# ---------------------------------------------------------------------------
 # 开发 / 测试
 # ---------------------------------------------------------------------------
 [feature.dev.pypi-dependencies]
@@ -87,6 +101,7 @@ hunyuan = ["hunyuan"]
 dots = ["dots"]
 dev = ["dev"]
 tools = ["tools"]
+mcp = ["mcp", "mlx", "hunyuan", "dev"]
 
 # ---------------------------------------------------------------------------
 # 任务
@@ -104,3 +119,7 @@ render-pdf = "python render_pdf.py"
 # 离线测试需要 pytest（dev 特性），运行: pixi run -e dev test
 [feature.dev.tasks]
 test = "pytest -q"
+
+# MCP server 任务（需 mcp 环境，模型引擎依赖 mlx/hunyuan 一并装入）
+[feature.mcp.tasks]
+mcp = "python mcp_server/server.py"
