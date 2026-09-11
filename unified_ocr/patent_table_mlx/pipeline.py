@@ -67,6 +67,16 @@ DEFAULT_MARKDOWN_IGNORE = (
     "footer", "footer_image", "aside_text",
 )
 
+# Recognizer per language. The paper used the English mobile model on English
+# patents; a Chinese patent needs a Chinese-capable recognizer, otherwise all
+# CJK body text comes out as mojibake. PP-OCRv5_server_rec is multilingual.
+REC_MODELS = {
+    "en": "en_PP-OCRv4_mobile_rec",
+    "ch": "PP-OCRv5_server_rec",
+    "multilingual": "PP-OCRv5_server_rec",
+    "zh": "PP-OCRv5_server_rec",
+}
+
 
 @dataclass
 class PatentPipelineMLXConfig:
@@ -76,6 +86,10 @@ class PatentPipelineMLXConfig:
     cell_model: str = "RT-DETR-L_wired_table_cell_det"
     det_model: str = "PP-OCRv5_server_det"
     rec_model: str = "en_PP-OCRv4_mobile_rec"
+    # Language of the recognizer. "en" keeps the paper's mobile model; "ch"
+    # (aliases: zh / multilingual) switches to PP-OCRv5_server_rec so CJK body
+    # text is recognised instead of mojibake.
+    rec_lang: str = "en"
 
     # MLX SLANeXt weights (ppocr-mlx checkout)
     slanext_dir: str = "models/ppocr-mlx/table_wired"
@@ -296,6 +310,19 @@ class PatentTableMLXPipeline:
         self._char = None
         self._mx = None
 
+    def rec_model_name(self) -> str:
+        """Resolve the recognizer model from ``rec_lang`` / ``rec_model``.
+
+        An explicit non-default ``rec_model`` always wins; otherwise
+        ``rec_lang="en"`` keeps the paper's ``en_PP-OCRv4_mobile_rec`` while a
+        non-English language (e.g. ``"ch"``) selects a multilingual recognizer.
+        """
+        explicit = self.config.rec_model
+        if explicit and explicit != REC_MODELS["en"]:
+            return explicit
+        lang = (self.config.rec_lang or "en").lower()
+        return REC_MODELS.get(lang, REC_MODELS["en"])
+
     # -- lazy model loading -------------------------------------------------
     def load(self) -> None:
         if self._slanext is not None:
@@ -330,8 +357,9 @@ class PatentTableMLXPipeline:
             **common,
         )
 
-        log.info("Loading recognizer %s", self.config.rec_model)
-        self._rec = create_model(self.config.rec_model, **common)
+        rec_model = self.rec_model_name()
+        log.info("Loading recognizer %s (lang=%s)", rec_model, self.config.rec_lang)
+        self._rec = create_model(rec_model, **common)
 
         log.info("Loading MLX SLANeXt from %s", self.config.slanext_dir)
         self._slanext = load_slanext(self.config.slanext_dir)

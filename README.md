@@ -332,7 +332,16 @@ finally:
 ```
 
 输出：`*.mlx_layout.json`（每个区域的 `label` / `kind` / `markdown` / `box`，
-表格区域额外含 `html`）与 `*.mlx_layout.md`（拼好的整篇文档）。
+表格区域额外含 `html` / `n_cells`）与 `*.mlx_layout.md`（拼好的整篇文档）。
+
+> **识别语言**：默认 `--rec-lang en`（论文用的英文模型 `en_PP-OCRv4_mobile_rec`）。
+> 中文专利的正文用英文模型会变成乱码，此时改用中文/多语模型：
+> ```bash
+> # 中文文档：正文 + 表格都用 PP-OCRv5_server_rec
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang ch
+> ```
+> 也可用 `--rec-model <name>` 直接指定识别模型。表格结构识别（MLX SLANeXt）与
+> 语言无关，不受影响。
 
 ### 统一框架 Python API / CLI
 

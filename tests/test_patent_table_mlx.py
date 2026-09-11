@@ -194,3 +194,20 @@ def test_texts_in_box_selects_centers():
     ]
     hits = PatentTableMLXPipeline._texts_in_box(ocr_pairs, [0, 0, 100, 100])
     assert [t for _, t in hits] == ["inside", "inside2"]
+
+
+def test_rec_model_name_language_switch():
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    en = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="en"))
+    assert en.rec_model_name() == "en_PP-OCRv4_mobile_rec"
+    ch = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="ch"))
+    assert ch.rec_model_name() == "PP-OCRv5_server_rec"
+    # explicit model wins only for the default language
+    custom = PatentTableMLXPipeline(
+        PatentPipelineMLXConfig(rec_lang="en", rec_model="my_rec")
+    )
+    assert custom.rec_model_name() == "my_rec"
