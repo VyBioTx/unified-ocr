@@ -10,3 +10,6 @@ models_cache/
 pages/
 attachments/
 result_*.md
+
+# MCP server runtime data (uploads + results)
+data/

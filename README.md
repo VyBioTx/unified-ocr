@@ -60,6 +60,10 @@ pixi install -e dev
 
 # 6. 工具环境（PDF 渲染 / 模型权重下载，可选）
 pixi install -e tools    # pymupdf + modelscope
+
+# 7. MCP server 环境（HTTP streamable，含上传 + 任务队列）
+pixi install -e mcp      # mcp + httpx-sse + uvicorn + starlette + pymupdf
+                         # （同时包含 mlx / hunyuan 两个模型引擎依赖）
 ```
 
 > 每个引擎对应 `pixi.toml` 里的一个 feature / environment；引擎依赖均延迟
@@ -103,6 +107,62 @@ python tools/download_model.py --type huggingface  # 或 --type modelscope
 权重含自定义 modeling 代码（`trust_remote_code=True`），需整目录保留。
 
 ## 使用
+
+### MCP server（HTTP streamable，给 Claude Code / Codex / 其他 AI 工具调用）
+
+```bash
+pixi run -e mcp mcp
+# MCP endpoint: http://localhost:8802/mcp
+```
+
+环境变量：
+
+- `MCP_HOST` / `MCP_PORT` — 绑定地址与端口（默认 `0.0.0.0:8802`）
+- `MAX_OCR_PARALLEL` — 并行 OCR 任务数上限（默认 `1`；内置任务队列，批量识别按此并发执行）
+- `MCP_UPLOAD_DIR` / `MCP_RESULT_DIR` — 上传 / 结果目录（默认 `<repo>/data/uploads|results`）
+- `MCP_PUBLIC_BASE_URL` — 生成下载链接用的外部地址（默认 `http://localhost:8802`）
+
+MCP 工具与调用流程（图片 / PDF 均可，输出为**去 bbox 的标准 Markdown**）：
+
+1. `upload_instructions()` — 获取上传地址与格式，同时列出可用模型
+2. `POST /upload`（multipart 字段 `file`）→ 返回 `file_id`
+3. `start_ocr_task(file_id, model=..., max_tokens=...)` — 提交识别任务 → 返回 `task_id`
+4. `get_task_status(task_id)` — 轮询进度；`done` 后返回 `result.download_url` 下载结果
+5. `list_tasks()` / `model_status()` — 任务列表 / 模型加载状态
+
+**`model` 参数**（`start_ocr_task`，默认 `glm-ocr`）：
+
+- 引擎 id：`glm-ocr`（默认）/ `paddleocr-vl` / `hunyuanocr`
+- 指定路径：`engine=path`，如 `glm-ocr=./models/GLM-OCR`、`hunyuanocr=./models/HunyuanOCR`
+- 裸路径 / HF id：如 `mlx-community/GLM-OCR-bf16`（按目录名前缀自动推断引擎）
+
+每个 model 首次使用时懒加载并缓存（同一进程内切换模型不会重复加载权重）；推理通过单一锁串行化，避免多个大模型并发占用 Metal GPU。
+
+```bash
+# 上传示例
+curl -F "file=@/path/to/doc.pdf" http://localhost:8802/upload
+```
+
+注册到 Claude Code / Cursor / Claude Desktop：
+
+```json
+{
+  "mcpServers": {
+    "unified-ocr": {
+      "type": "http",
+      "url": "http://localhost:8802/mcp"
+    }
+  }
+}
+```
+
+注册到 OpenAI Codex CLI（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.unified-ocr]
+type = "http"
+url = "http://localhost:8802/mcp"
+```
 
 ### 引擎 CLI（命令行快捷识别单张图片）
 
