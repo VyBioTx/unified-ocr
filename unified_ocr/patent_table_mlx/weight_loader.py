@@ -1,224 +1,156 @@
-"""从 PaddleX 官方权重导出/加载到 MLX 模型。
+"""Load ``plaincompute/ppocr-mlx`` MLX safetensors into the MLX SLANeXt model.
 
-PaddleX 3.7 的 SLANeXt 是 HF-transformers 风格模型（继承 PretrainedModel），
-理论上可以 save_pretrained 输出 HF 格式（config.json + model.safetensors）。
-如果不行则直接从 pdiparams 批量提取并按规范命名映射。
+The ppocr-mlx checkpoints already use HF/transformers-style parameter names, and
+:mod:`unified_ocr.patent_table_mlx.slanext` mirrors those names exactly, so
+loading is a straight key passthrough (no shape-matching heuristics).
+
+Typical use::
+
+    from unified_ocr.patent_table_mlx import load_slanext
+    model = load_slanext("models/ppocr-mlx/table_wired")
+    probs = model(mx.array(img[None]))          # [1, seq, 50]
+    structure = decode_structure(mx.argmax(probs[0], axis=-1).tolist())
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any
 
 import mlx.core as mx
-import numpy as np
 
 from .slanext import SLANeXt, SLANeXtConfig
 
+# PaddleX SLANeXt_wired / _wireless TableLabelDecode character_dict (48 symbols).
+SLANEXT_CHARACTER_DICT = [
+    "<thead>", "</thead>", "<tbody>", "</tbody>", "<tr>", "</tr>",
+    "<td>", "<td", ">", "</td>",
+    ' colspan="2"', ' colspan="3"', ' colspan="4"', ' colspan="5"',
+    ' colspan="6"', ' colspan="7"', ' colspan="8"', ' colspan="9"',
+    ' colspan="10"', ' colspan="11"', ' colspan="12"', ' colspan="13"',
+    ' colspan="14"', ' colspan="15"', ' colspan="16"', ' colspan="17"',
+    ' colspan="18"', ' colspan="19"', ' colspan="20"',
+    ' rowspan="2"', ' rowspan="3"', ' rowspan="4"', ' rowspan="5"',
+    ' rowspan="6"', ' rowspan="7"', ' rowspan="8"', ' rowspan="9"',
+    ' rowspan="10"', ' rowspan="11"', ' rowspan="12"', ' rowspan="13"',
+    ' rowspan="14"', ' rowspan="15"', ' rowspan="16"', ' rowspan="17"',
+    ' rowspan="18"', ' rowspan="19"', ' rowspan="20"',
+]
 
-def _load_paddle_pdiparams(model_dir: str | Path) -> dict[str, mx.array]:
-    """Load Paddle inference.pdiparams and return as dict of mx.arrays.
+BEG_STR = "sos"
+END_STR = "eos"
 
-    pdiparams is a flat concatenated tensor; we need the inference.json
-    to know split points. PaddleX 3.x stores each param's weights in
-    separate entries that paddle.load() returns as a flat Tensor.
-    We parse the PIR program to infer split positions.
 
-    对于 PaddleX 3.x 的 PIR 格式，权重在 inference.json 中用 'p' op
-    声明（persistable variable），pdiparams 存储其拼接后的值。
-    此函数解析 PIR 程序，提取每个参数名与形状，并从拼接张量中切分。
-    """
-    import paddle
+# ppocr-mlx stores the backbone post conv as ``backbone.post_conv.weight`` while
+# the MLX module nests an ``nn.Conv2d`` under ``PostConv.conv`` — remap the key.
+_KEY_REMAP = {
+    "backbone.post_conv.": "backbone.post_conv.conv.",
+}
 
+
+def _remap_key(key: str) -> str:
+    for src, dst in _KEY_REMAP.items():
+        if key.startswith(src) and not key.startswith(dst):
+            return dst + key[len(src):]
+    return key
+
+
+def load_mlx_weights(model_dir: str | Path) -> list[tuple[str, mx.array]]:
+    """Return ``[(key, mx.array), ...]`` from ``<model_dir>/model.mlx.safetensors``."""
+    path = Path(model_dir) / "model.mlx.safetensors"
+    if not path.exists():
+        raise FileNotFoundError(f"MLX weights not found: {path}")
+    weights = dict(mx.load(str(path)))
+    weights.pop("__metadata__", None)
+    return [(_remap_key(k), v) for k, v in weights.items()]
+
+
+def load_slanext(model_dir: str | Path, strict: bool = True) -> SLANeXt:
+    """Instantiate SLANeXt from a ppocr-mlx folder (``config.json`` + weights)."""
     model_dir = Path(model_dir)
-    # 用 paddle.load 读取整个 pdiparams（返回一个大 Tensor）
-    params_path = model_dir / "inference.pdiparams"
-    if not params_path.exists():
-        raise FileNotFoundError(f"Paddle params not found: {params_path}")
-
-    flat_tensor = paddle.load(str(params_path))
-    flat_np = flat_tensor.numpy()
-
-    # 从 inference.json（PIR 格式）解析参数定义
-    with open(model_dir / "inference.json") as f:
-        prog = json.load(f)
-
-    param_defs = []
-    regions = prog.get("program", {}).get("regions", [])
-    for region in regions:
-        for block in region.get("blocks", []):
-            for op in block.get("ops", []):
-                if op.get("#") == "p":
-                    A = op.get("A", [])
-                    if len(A) >= 4 and isinstance(A[3], str):
-                        name = A[3]
-                        # 解析 shape
-                        tt_d = op.get("O", {}).get("TT", {}).get("D", [])
-                        if len(tt_d) >= 2:
-                            shape = list(tt_d[1])
-                        else:
-                            shape = []
-                        param_defs.append((name, shape))
-
-    # 按照 pdiparams 中的存储顺序切分权重
-    # PIR 中 pdiparams 按参数名排序（lexicographic）拼接
-    param_defs.sort(key=lambda x: x[0])
-
-    result = {}
-    offset = 0
-    for name, shape in param_defs:
-        size = int(np.prod(shape)) if shape else 1
-        arr = flat_np[offset : offset + size].reshape(shape)
-        result[name] = mx.array(arr)
-        offset += size
-
-    if offset != len(flat_np):
-        print(f"Warning: expected {offset} bytes, got {len(flat_np)}")
-
-    return result
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"config.json not found: {cfg_path}")
+    with open(cfg_path) as f:
+        config = SLANeXtConfig.from_config_dict(json.load(f))
+    model = SLANeXt(config)
+    model.load_weights(load_mlx_weights(model_dir), strict=strict)
+    return model
 
 
-def load_weights_to_slanext(model: SLANeXt, weights: dict[str, mx.array]) -> None:
-    """Load PaddleX weights into MLX SLANeXt model.
+# ---------------------------------------------------------------------------
+# Decoding
+# ---------------------------------------------------------------------------
 
-    The weight key mapping from PaddleX (e.g. 'linear_54.w_0') to
-    the MLX model's parameter structure is done by matching shapes
-    and layer index.
+def build_character_list(
+    dict_character: list[str] | None = None,
+    merge_no_span_structure: bool = True,
+) -> list[str]:
+    """Replicate PaddleX ``TableLabelDecode`` character list construction."""
+    dc = list(dict_character if dict_character is not None else SLANEXT_CHARACTER_DICT)
+    if merge_no_span_structure:
+        if "<td></td>" not in dc:
+            dc.append("<td></td>")
+        if "<td>" in dc:
+            dc.remove("<td>")
+    return [BEG_STR] + dc + [END_STR]
 
-    由于 PaddleX PIR 中参数名为 flat identifier（linear_XX.XX_0），
-    需要与 MLX 模型结构的子模块一一对应。这里直接按 module 路径赋值。
+
+def decode_structure_tokens(
+    token_ids: list[int],
+    character: list[str] | None = None,
+    with_wrapper: bool = True,
+) -> list[str]:
+    """Decode argmax token ids into the list of structure token strings.
+
+    Same stopping/ignoring rules as :func:`decode_structure`, but returns the
+    individual tokens (PaddleX ``table_structure_result`` format).  With
+    ``with_wrapper=True`` the standard ``<html><body><table>`` prefix and
+    ``</table></body></html>`` suffix are added.
     """
-    # 直接匹配：MLX 模型参数名与 Paddle HF 格式 key 的映射需要逐个核对。
-    # 因为 PaddleX 权重的 key 并非结构化名称，我们采用 shape-match 策略：
-    # 遍历 MLX 模型的所有参数，从 weights dict 中找 shape 匹配的项。
+    char = character if character is not None else build_character_list()
+    end_idx = char.index(END_STR)
+    beg_idx = char.index(BEG_STR)
 
-    # 获取 MLX 模型的参数 leaf 路径
-    mlx_params = {}
-    _collect_params(model, "", mlx_params)
-
-    used = set()
-    unmatched_mlx = []
-    matched = 0
-
-    for param_path, param_arr in mlx_params.items():
-        # 从 weights 找 shape 匹配的 paddle 参数
-        found = False
-        for pname, parr in weights.items():
-            if pname in used:
-                continue
-            if parr.shape == param_arr.shape:
-                # 候选匹配 — 根据语义规则确认
-                _assign_param(model, param_path, parr)
-                used.add(pname)
-                matched += 1
-                found = True
-                break
-        if not found:
-            unmatched_mlx.append(param_path)
-
-    w = len(weights) - len(used)
-    print(f"Loaded {matched}/{len(mlx_params)} MLX params "
-          f"({w} unused paddle weights)")
-    if unmatched_mlx:
-        print(f"Unmatched MLX params ({len(unmatched_mlx)}):")
-        for p in unmatched_mlx[:10]:
-            print(f"  {p}")
-
-
-def _collect_params(module, prefix, result):
-    """Collect all leaf weight parameters from an MLX module."""
-    for name, child in module.__dict__.items():
-        if name.startswith("_"):
+    tokens: list[str] = []
+    for i, cid in enumerate(token_ids):
+        cid = int(cid)
+        if i > 0 and cid == end_idx:
+            break
+        if cid in (beg_idx, end_idx):
             continue
-        full_name = f"{prefix}.{name}" if prefix else name
-        if isinstance(child, nn.Module):
-            _collect_params(child, full_name, result)
-        elif isinstance(child, mx.array):
-            result[full_name] = child
-        elif hasattr(child, '__call__') and hasattr(child, '__dict__'):
-            pass  # skip callable objects
+        tokens.append(char[cid])
+
+    if with_wrapper:
+        return ["<html>", "<body>", "<table>"] + tokens + ["</table>", "</body>", "</html>"]
+    return tokens
 
 
-def _assign_param(model, path, value):
-    """Assign a weight to an MLX model by dot-separated path."""
-    parts = path.split(".")
-    obj = model
-    for p in parts[:-1]:
-        obj = getattr(obj, p, None)
-        if obj is None:
-            return
-    setattr(obj, parts[-1], value)
+def decode_structure(
+    token_ids: list[int],
+    character: list[str] | None = None,
+    with_wrapper: bool = True,
+) -> str:
+    """Decode argmax token ids into the table structure string.
 
-
-def export_to_safetensors(
-    model_dir: str | Path,
-    output_path: str | Path,
-) -> None:
-    """Convert PaddleX SLANeXt weights to safetensors + HF config.
-
-    导出文件可供 MLX/transformers 直接加载。
+    Mirrors PaddleX ``TableLabelDecode.decode``: skip the BOS token, stop at the
+    first EOS after position 0, and ignore BOS/EOS ids.  Optionally wrap in
+    ``<html><body><table> ... </table></body></html>``.
     """
-    import paddle
+    char = character if character is not None else build_character_list()
+    end_idx = char.index(END_STR)
+    beg_idx = char.index(BEG_STR)
 
-    model_dir = Path(model_dir)
-    config_path = model_dir / "inference.yml"
-    out_path = Path(output_path)
-    out_path.mkdir(parents=True, exist_ok=True)
+    pieces: list[str] = []
+    for i, cid in enumerate(token_ids):
+        cid = int(cid)
+        if i > 0 and cid == end_idx:
+            break
+        if cid in (beg_idx, end_idx):
+            continue
+        pieces.append(char[cid])
 
-    # 1. 加载 paddle 权重
-    weights = _load_paddle_pdiparams(model_dir)
-
-    # 2. 转换为 dict of numpy arrays（HF key 命名）
-    state_dict = {}
-    for pname, arr in weights.items():
-        state_dict[pname] = np.array(arr)
-
-    # 3. 保存 safetensors
-    try:
-        import safetensors.numpy
-        safetensors.numpy.save_file(
-            state_dict,
-            str(out_path / "model.safetensors"),
-        )
-        print(f"safetensors saved: {out_path / 'model.safetensors'}")
-    except ImportError:
-        np.savez(out_path / "model.npz", **state_dict)
-        print(f"npz saved: {out_path / 'model.npz'} (safetensors not available)")
-
-    # 4. 保存 HF config
-    hf_config = {
-        "model_type": "slanext",
-        "architectures": ["SLANeXt"],
-        "vision_config": {
-            "hidden_size": 768,
-            "output_channels": 256,
-            "num_hidden_layers": 12,
-            "num_attention_heads": 12,
-            "num_channels": 3,
-            "image_size": 512,
-            "patch_size": 16,
-            "hidden_act": "gelu",
-            "layer_norm_eps": 1e-6,
-            "qkv_bias": True,
-            "use_abs_pos": True,
-            "use_rel_pos": True,
-            "window_size": 14,
-            "global_attn_indexes": [2, 5, 8, 11],
-            "mlp_dim": 3072,
-        },
-        "post_conv_in_channels": 256,
-        "post_conv_out_channels": 512,
-        "out_channels": 50,
-        "hidden_size": 512,
-        "max_text_length": 500,
-    }
-    with open(out_path / "config.json", "w") as f:
-        json.dump(hf_config, f, indent=2)
-
-    print(f"Config saved: {out_path / 'config.json'}")
-
-
-# 需要延迟导入避免循环引用
-import mlx.nn as nn
+    structure = "".join(pieces)
+    if with_wrapper:
+        return "<html><body><table>" + structure + "</table></body></html>"
+    return structure

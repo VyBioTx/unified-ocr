@@ -197,6 +197,42 @@ finally:
 GPU 推理显存约需 8GB（全模型 + 3000px 大图），显存紧张时
 传 `--gpu-mem-mb 5500` 或 `PatentTablePipelineConfig(gpu_memory_limit_mb=...)` 限制。
 
+### MLX 原生 SLANeXt（macOS Metal，ppocr-mlx 权重）
+
+除 PaddleX 路径外，`unified_ocr/patent_table_mlx` 提供了 **SLANeXt 表格结构识别**
+的纯 MLX 实现，直接加载 `plaincompute/ppocr-mlx` 的 MLX 权重
+（`model.mlx.safetensors`，官方 PaddleX 权重的 MLX 转换），在 Apple Silicon
+的 Metal GPU 上运行，无需 Paddle/PaddleX。
+
+- 参数名与 ppocr-mlx safetensors 键一一对应，权重按键直接加载（`strict=True`
+  会在任何键/形状不匹配时报错）。
+- 已在 M4 Pro 上与 PaddleX 官方 `SLANeXt_wired` 逐 token 对齐验证：
+  同一输入下 183/183 结构 token 一致，解码出的表格 HTML 与 PaddleX **逐字节相同**。
+- 完整流水线所需的其余模块（版面分析、文本检测/识别、表格单元格检测）在
+  ppocr-mlx 中对应 `doclayoutv3/`、`det/`、`rec/`、`en_rec/`、
+  `table_cell_wired/` 等目录。
+
+```bash
+# 下载全部 ppocr-mlx 权重（约 3.8 GB，HuggingFace 可达时）
+python -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('plaincompute/ppocr-mlx', local_dir='models/ppocr-mlx')"
+```
+
+```python
+import mlx.core as mx
+from unified_ocr.patent_table_mlx import load_slanext, decode_structure
+from unified_ocr.patent_table_mlx.preprocess import preprocess_image
+
+model = load_slanext("models/ppocr-mlx/table_wired")
+x = preprocess_image("table.png")                 # CHW 3x512x512 (BGR, PaddleX 同款预处理)
+probs = model(mx.array(x[None]))                  # [1, seq, 50]
+ids = [int(v) for v in mx.argmax(probs[0], axis=-1)]
+print(decode_structure(ids))                      # <html><body><table>…</table></body></html>
+```
+
+> 依赖：`pixi run -e mlx …`（mlx / mlx-lm / mlx-vlm）。测试：`pixi run -e mlx-test pytest tests/test_patent_table_mlx.py`
+> （无 MLX 的环境会自动 skip 该模块）。
+
 ### 统一框架 Python API / CLI
 
 ```python

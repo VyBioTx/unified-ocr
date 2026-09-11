@@ -1,32 +1,44 @@
-"""MLX-based PP-StructureV3 for macOS Apple Silicon (Metal GPU) acceleration.
+"""MLX-native PP-StructureV3 components for macOS Apple Silicon (Metal GPU).
 
-这个模块基于 `plaincompute/ppocr-mlx` 的 MLX 权重格式（与 PaddleX 官方权重同源），
-实现了 PP-StructureV3 专利表格识别 pipeline 的纯 MLX 推理层，跑在 Metal GPU 上。
+Weights come from `plaincompute/ppocr-mlx <https://huggingface.co/plaincompute/ppocr-mlx>`_,
+an MLX conversion of the official PaddleX / PP-Structure checkpoints.  Each model
+is a structurally faithful MLX port whose parameter names match the converted
+safetensors keys, so weights load directly.
 
-架构总览::
-
-    PatentTablePipelineMLX
-      ├── PP-DocLayout_plus-L   (版面分析，跳过 / Paddle CPU 后备)
-      ├── RT-DETR-L_wired       (表格单元格检测 → ONNX CoreML)
-      ├── SLANeXt_wired         (表格结构识别 → MLX native)
-      ├── PP-OCRv5_server_det   (文本检测 → ONNX CoreML)
-      └── PP-OCRv5_server_rec   (文本识别 → MLX native)
-
-当前实现进度:
-  ✅ SLANeXt_wired  — MLX native (SAM-ViT encoder + Attention GRU + autoregressive解码)
-  ✅ PP-OCRv5_rec   — MLX native (SVTR encoder + CTC head)
-  🔲 RT-DETR-L  — ONNX CoreML (已转换)
-  🔲 PP-OCRv5_det — ONNX CoreML (已转换)
-  🔲 端到端 pipeline 组装
+Implemented so far:
+  * ``SLANeXt`` (SLANeXt_wired / SLANeXt_wireless) — table structure recognition
 """
 
 from __future__ import annotations
 
 from .slanext import SLANeXt, SLANeXtConfig
-from .weight_loader import load_paddle_weights_to_mlx
+from .weight_loader import (
+    SLANEXT_CHARACTER_DICT,
+    build_character_list,
+    decode_structure,
+    decode_structure_tokens,
+    load_mlx_weights,
+    load_slanext,
+)
 
 __all__ = [
     "SLANeXt",
     "SLANeXtConfig",
-    "load_paddle_weights_to_mlx",
+    "SLANEXT_CHARACTER_DICT",
+    "build_character_list",
+    "decode_structure",
+    "decode_structure_tokens",
+    "load_mlx_weights",
+    "load_slanext",
+    "PatentTableMLXPipeline",
+    "PatentPipelineMLXConfig",
 ]
+
+
+def __getattr__(name):
+    # Lazy: the pipeline pulls in PaddleX, which is an optional dependency.
+    if name in ("PatentTableMLXPipeline", "PatentPipelineMLXConfig"):
+        from . import pipeline as _pipeline
+
+        return getattr(_pipeline, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

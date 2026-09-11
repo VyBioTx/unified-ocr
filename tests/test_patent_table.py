@@ -137,6 +137,40 @@ def test_table_structure_markdown():
     assert "| ---" in md
 
 
+def test_markdown_colspan_title_stays_rectangular():
+    """跨整行的表题（colspan）不应把表头压成 1 列、导致数据被截断。"""
+    ts = parse_html_table(
+        "<table>"
+        '<tr><td colspan="3">Title</td></tr>'
+        "<tr><td>Days</td><td>0</td><td>3</td></tr>"
+        "<tr><td>siNC</td><td>18%</td><td>15%</td></tr>"
+        "</table>"
+    )
+    md = ts.to_markdown()
+    lines = [ln for ln in md.splitlines() if ln.startswith("|")]
+    widths = {ln.count("|") - 1 for ln in lines}
+    assert widths == {3}                        # 所有行 3 列
+    assert "Title" in md                         # 表题保留（作为 caption）
+    assert "| Days | 0 | 3 |" in md
+    assert "| siNC | 18% | 15% |" in md
+
+
+def test_markdown_rowspan_fills_down():
+    """rowspan 标签应向下填充，使每行列数一致且不丢内容。"""
+    ts = parse_html_table(
+        "<table>"
+        "<tr><td>Gene</td><td>Value</td></tr>"
+        '<tr><td rowspan="2">KRAS</td><td>1.2</td></tr>'
+        "<tr><td>3.4</td></tr>"
+        "</table>"
+    )
+    md = ts.to_markdown()
+    lines = [ln for ln in md.splitlines() if ln.startswith("|")]
+    assert {ln.count("|") - 1 for ln in lines} == {2}
+    assert "| KRAS | 1.2 |" in md
+    assert "| KRAS | 3.4 |" in md
+
+
 def test_table_structure_find_column():
     ts = parse_html_table(SAMPLE_TABLE_HTML)
     assert ts.find_column(["sequence"]) == 1

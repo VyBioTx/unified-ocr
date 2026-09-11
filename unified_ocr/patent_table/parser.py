@@ -14,6 +14,21 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+_MD_PIPE = "\u241f"  # ␟ placeholder while escaping, restored as "\|" inline
+
+
+def _md_escape(text: str) -> str:
+    """转义会破坏 Markdown 表格的字符（竖线、换行）。"""
+    return (
+        (text or "")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("\\|", _MD_PIPE)   # 已转义的不重复处理
+        .replace("|", "\\|")
+        .replace(_MD_PIPE, "\\|")
+        .strip()
+    )
+
 
 @dataclass
 class TableCell:
@@ -54,16 +69,77 @@ class TableStructure:
             for row in self.rows
         ]
 
+    def expand_grid(self) -> tuple[list[list[str]], int]:
+        """把 rowspan/colspan 展开成规整的二维网格。
+
+        PP-StructureV3 的 HTML 里存在 ``colspan``（如跨整行的表题）和
+        ``rowspan``（如整列共用的 Gene 标签）。若直接把每行 ``<td>`` 平铺成
+        Markdown，表头列数与数据行列数会不一致，GFM 渲染器会按表头列数截断
+        数据行，导致内容"丢失"。这里按 HTML 语义展开：
+
+        - ``colspan``：文本落在首格，其余格留空；
+        - ``rowspan``：文本向下填充到每一行（便于按行读取）。
+
+        Returns:
+            ``(grid, num_cols)``，grid 每行等长、无 None。
+        """
+        ncols = self.num_cols or max((len(r.cells) for r in self.rows), default=0)
+        if ncols == 0:
+            return [], 0
+
+        grid: list[list[str | None]] = [[None] * ncols for _ in self.rows]
+        for r, row in enumerate(self.rows):
+            c = 0
+            for cell in row.cells:
+                while c < ncols and grid[r][c] is not None:
+                    c += 1
+                if c >= ncols:
+                    break
+                rowspan = max(1, cell.rowspan)
+                colspan = max(1, cell.colspan)
+                for dr in range(rowspan):
+                    rr = r + dr
+                    if rr >= len(self.rows):
+                        break
+                    for dc in range(colspan):
+                        cc = c + dc
+                        if cc >= ncols or grid[rr][cc] is not None:
+                            continue
+                        if dr == 0 and dc == 0:
+                            grid[rr][cc] = cell.text
+                        elif dr > 0 and dc == 0:
+                            grid[rr][cc] = cell.text      # rowspan 向下填充
+                        else:
+                            grid[rr][cc] = ""             # colspan 续格留空
+                c += colspan
+
+        return [[("" if v is None else v) for v in row] for row in grid], ncols
+
     def to_markdown(self) -> str:
-        """渲染为 Markdown 表格。"""
+        """渲染为 Markdown 表格（自动展开 rowspan/colspan，保证列数一致）。"""
         if not self.rows:
             return ""
+        grid, ncols = self.expand_grid()
+        if ncols == 0:
+            return ""
+
         lines: list[str] = []
-        for i, row in enumerate(self.rows):
-            cells = [c.text.replace("\n", " ") for c in row.cells]
-            lines.append("| " + " | ".join(cells) + " |")
-            if i == 0:
-                lines.append("| " + " | ".join("---" for _ in row.cells) + " |")
+        start = 0
+        # 首行若为跨整行的单格（表题），作为 caption 置于表格上方，不当作表头。
+        first = self.rows[0].cells
+        if (len(self.rows) > 1 and len(first) == 1
+                and max(1, first[0].colspan) >= ncols):
+            caption = _md_escape(first[0].text)
+            if caption:
+                lines.append(caption)
+                lines.append("")   # 空行：否则 GFM 不会把后面的行识别为表格
+            start = 1
+
+        header = grid[start] if start < len(grid) else [""] * ncols
+        lines.append("| " + " | ".join(_md_escape(v) for v in header) + " |")
+        lines.append("| " + " | ".join("---" for _ in range(ncols)) + " |")
+        for row in grid[start + 1:]:
+            lines.append("| " + " | ".join(_md_escape(v) for v in row) + " |")
         return "\n".join(lines)
 
     def find_column(self, keywords: list[str]) -> int | None:
@@ -156,14 +232,24 @@ def _extract_text(element: Any) -> str:
 def _parse_html_fallback(html: str) -> TableStructure | None:
     """无 lxml 时的正则回退解析（仅处理简单表格）。"""
     row_pattern = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
-    cell_pattern = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+    cell_pattern = re.compile(r"<t[dh]([^>]*)>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+    attr_pattern = re.compile(r'(rowspan|colspan)\s*=\s*["\']?(\d+)', re.IGNORECASE)
+
+    def _span(attrs: str, name: str) -> int:
+        m = re.search(name + r'\s*=\s*["\']?(\d+)', attrs, re.IGNORECASE)
+        return int(m.group(1)) if m else 1
 
     rows: list[TableRow] = []
     for tr_match in row_pattern.finditer(html):
         cells: list[TableCell] = []
         for col_idx, td_match in enumerate(cell_pattern.finditer(tr_match.group(1))):
-            cell_text = re.sub(r"<[^>]+>", "", td_match.group(1)).strip()
-            cells.append(TableCell(text=cell_text, col=col_idx))
+            attrs, body = td_match.group(1), td_match.group(2)
+            cell_text = re.sub(r"<[^>]+>", "", body).strip()
+            cells.append(TableCell(
+                text=cell_text, col=col_idx,
+                rowspan=_span(attrs, "rowspan"),
+                colspan=_span(attrs, "colspan"),
+            ))
         if cells:
             rows.append(TableRow(cells=cells))
 
