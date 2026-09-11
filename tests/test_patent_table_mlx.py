@@ -113,3 +113,84 @@ def test_real_weights_forward():
     html = decode_structure(ids)
     assert html.startswith("<html><body><table>")
     assert html.endswith("</table></body></html>")
+
+
+# ---------------------------------------------------------------------------
+# Full-document (layout) mode helpers — pure functions, no model weights.
+# ---------------------------------------------------------------------------
+
+def test_reading_order_single_column():
+    from unified_ocr.patent_table_mlx.pipeline import reading_order
+
+    regs = [
+        {"label": "text", "box": [10, 100, 200, 150]},
+        {"label": "text", "box": [10, 10, 200, 50]},
+    ]
+    ordered = reading_order(regs, width=1000)
+    assert [r["box"][1] for r in ordered] == [10, 100]
+
+
+def test_reading_order_two_columns():
+    from unified_ocr.patent_table_mlx.pipeline import reading_order
+
+    regs = [
+        {"label": "text", "box": [10, 100, 180, 150]},   # left col, 2nd
+        {"label": "text", "box": [600, 100, 980, 150]},  # right col, 2nd
+        {"label": "text", "box": [10, 10, 180, 60]},     # left col, 1st
+        {"label": "text", "box": [600, 10, 980, 60]},    # right col, 1st
+    ]
+    ordered = reading_order(regs, width=1000)
+    # left column fully, then right column
+    assert [r["box"][0] for r in ordered] == [10, 10, 600, 600]
+    assert [r["box"][1] for r in ordered] == [10, 100, 10, 100]
+
+
+def test_join_lines_space_vs_newline():
+    from unified_ocr.patent_table_mlx.pipeline import _join_lines
+
+    same_para = [([0, 10, 50, 20], "Hello"), ([0, 22, 50, 32], "world")]
+    assert _join_lines(same_para) == "Hello world"
+    new_para = [([0, 10, 50, 20], "Hello"), ([0, 200, 50, 210], "world")]
+    assert _join_lines(new_para) == "Hello\nworld"
+
+
+def test_format_region_markdown_labels():
+    from unified_ocr.patent_table_mlx.pipeline import format_region_markdown
+
+    assert format_region_markdown("doc_title", "Patent") == "# Patent"
+    assert format_region_markdown("paragraph_title", "Claims") == "## Claims"
+    assert format_region_markdown("figure_title", "Fig. 1") == "**Fig. 1**"
+    assert format_region_markdown("image", "") == "[image]"
+    assert format_region_markdown("text", "a paragraph") == "a paragraph"
+    assert format_region_markdown("text", "") == ""
+
+
+def test_document_markdown_groups_by_page():
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentTableMLXPipeline,
+        RegionResult,
+    )
+
+    regions = [
+        RegionResult(page_index=1, label="doc_title", markdown="# T"),
+        RegionResult(page_index=1, label="text", markdown="body"),
+        RegionResult(page_index=2, label="text", markdown="page two"),
+    ]
+    md = PatentTableMLXPipeline.document_markdown(regions)
+    assert "## 第 1 页" in md and "# T" in md and "body" in md
+    assert "## 第 2 页" in md and "page two" in md
+    # non-header mode just joins the fragments
+    flat = PatentTableMLXPipeline.document_markdown(regions, page_headers=False)
+    assert "## 第 1 页" not in flat and "page two" in flat
+
+
+def test_texts_in_box_selects_centers():
+    from unified_ocr.patent_table_mlx.pipeline import PatentTableMLXPipeline
+
+    ocr_pairs = [
+        ([10, 10, 30, 20], "inside"),
+        ([10, 200, 30, 210], "outside"),
+        ([50, 50, 70, 60], "inside2"),
+    ]
+    hits = PatentTableMLXPipeline._texts_in_box(ocr_pairs, [0, 0, 100, 100])
+    assert [t for _, t in hits] == ["inside", "inside2"]

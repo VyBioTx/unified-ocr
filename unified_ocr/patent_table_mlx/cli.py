@@ -1,12 +1,21 @@
-"""CLI for the assembled MLX PP-StructureV3 patent-table pipeline.
+"""CLI for the assembled MLX PP-StructureV3 pipeline.
+
+Two modes:
+  * **table** (default) — extract only the table regions (HTML + Markdown).
+  * **layout** — full document: layout analysis over all regions, tables plus
+    non-table content (titles / text / captions / formulas / figures) rendered
+    to a single Markdown document.
 
 Examples::
 
-    # one page image → JSON + markdown
+    # one page image → tables only
     python -m unified_ocr.patent_table_mlx.cli run page_02.png -o out/
 
-    # whole PDF (rendered with PyMuPDF, paper det params)
-    python -m unified_ocr.patent_table_mlx.cli pdf patent.pdf -o out/ --device cpu
+    # whole PDF → full document markdown (tables + text)
+    python -m unified_ocr.patent_table_mlx.cli pdf patent.pdf -o out/ --layout
+
+    # one page image → full document
+    python -m unified_ocr.patent_table_mlx.cli run page_02.png -o out/ --layout
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from .pipeline import PatentPipelineMLXConfig, PatentTableMLXPipeline
 def _results_to_dict(results, source: str) -> dict:
     return {
         "source": str(source),
+        "mode": "table",
         "config": {
             "layout_model": "PP-DocLayout_plus-L",
             "cell_model": "RT-DETR-L_wired_table_cell_det",
@@ -45,17 +55,66 @@ def _results_to_dict(results, source: str) -> dict:
     }
 
 
+def _regions_to_dict(results, source: str) -> dict:
+    return {
+        "source": str(source),
+        "mode": "layout",
+        "config": {
+            "layout_model": "PP-DocLayout_plus-L",
+            "cell_model": "RT-DETR-L_wired_table_cell_det",
+            "det_model": "PP-OCRv5_server_det",
+            "rec_model": "en_PP-OCRv4_mobile_rec",
+            "structure_model": "SLANeXt_wired (MLX native)",
+        },
+        "regions": [
+            {
+                "page_index": r.page_index,
+                "region_index": r.region_index,
+                "label": r.label,
+                "box": [round(v, 2) for v in r.box],
+                "kind": "table" if r.is_table else "text",
+                "markdown": r.markdown,
+                "html": r.table.html if r.table is not None else None,
+            }
+            for r in results
+        ],
+    }
+
+
 def _write_outputs(payload: dict, out_dir: Path, stem: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{stem}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    md = [f"# {payload['source']} — PP-StructureV3 (MLX) 表格抽取\n"]
-    for t in payload["tables"]:
-        md.append(f"\n## 第 {t['page_index']} 页 · 表 {t['table_index'] + 1}\n")
-        md.append(t["markdown"] or t["html"])
-        md.append("")
-    (out_dir / f"{stem}.md").write_text("\n".join(md), encoding="utf-8")
+    if payload.get("mode") == "layout":
+        body = PatentTableMLXPipeline.document_markdown(
+            _rehydrate_regions(payload)
+        )
+        md = f"# {payload['source']} — PP-StructureV3 (MLX) 全文档抽取\n\n{body}\n"
+    else:
+        md = [f"# {payload['source']} — PP-StructureV3 (MLX) 表格抽取\n"]
+        for t in payload["tables"]:
+            md.append(f"\n## 第 {t['page_index']} 页 · 表 {t['table_index'] + 1}\n")
+            md.append(t["markdown"] or t["html"])
+            md.append("")
+        md = "\n".join(md)
+    (out_dir / f"{stem}.md").write_text(md, encoding="utf-8")
+
+
+def _rehydrate_regions(payload: dict):
+    """Rebuild lightweight RegionResult objects from the JSON payload."""
+    from .pipeline import RegionResult
+
+    return [
+        RegionResult(
+            page_index=r["page_index"],
+            region_index=r["region_index"],
+            label=r["label"],
+            box=r["box"],
+            markdown=r["markdown"],
+        )
+        for r in payload["regions"]
+    ]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,6 +122,8 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--device", default="cpu",
                         help="PaddleX device, e.g. cpu / gpu:0")
     common.add_argument("--slanext-dir", default="models/ppocr-mlx/table_wired")
+    common.add_argument("--layout", action="store_true",
+                        help="full-document mode: also recognise non-table regions")
 
     p = argparse.ArgumentParser(prog="patent-table-mlx")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -91,22 +152,35 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "run":
         src = Path(args.image)
-        stem = src.stem + ".mlx_tables"
     else:
         src = Path(args.pdf)
-        stem = src.stem + ".mlx_tables"
+    stem = src.stem + (".mlx_layout" if args.layout else ".mlx_tables")
 
     pipe = PatentTableMLXPipeline(cfg)
     try:
-        if args.cmd == "run":
-            results = pipe.process_image(src)
+        if args.layout:
+            if args.cmd == "run":
+                regions = pipe.process_image_layout(src)
+            else:
+                regions = pipe.process_pdf_layout(src, max_pages=args.max_pages)
+            payload = _regions_to_dict(regions, src)
+            n = len(payload["regions"])
+            n_tables = sum(1 for r in payload["regions"] if r["kind"] == "table")
+            _write_outputs(payload, out_dir, stem)
+            sys.stdout.write(
+                f"wrote {out_dir / (stem + '.json')} "
+                f"({n} region(s), {n_tables} table(s))\n"
+            )
         else:
-            results = pipe.process_pdf(src, max_pages=args.max_pages)
-        payload = _results_to_dict(results, src)
-        _write_outputs(payload, out_dir, stem)
-        sys.stdout.write(
-            f"wrote {out_dir / (stem + '.json')} ({len(results)} table(s))\n"
-        )
+            if args.cmd == "run":
+                results = pipe.process_image(src)
+            else:
+                results = pipe.process_pdf(src, max_pages=args.max_pages)
+            payload = _results_to_dict(results, src)
+            _write_outputs(payload, out_dir, stem)
+            sys.stdout.write(
+                f"wrote {out_dir / (stem + '.json')} ({len(results)} table(s))\n"
+            )
         sys.stdout.flush()
     finally:
         try:

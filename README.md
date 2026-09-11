@@ -293,6 +293,47 @@ print(decode_structure(ids))                      # <html><body><table>…</tabl
 > 依赖：`pixi run -e mlx …`（mlx / mlx-lm / mlx-vlm）。测试：`pixi run -e mlx-test pytest tests/test_patent_table_mlx.py`
 > （无 MLX 的环境会自动 skip 该模块）。
 
+#### 全文档模式（表格 + 非表格内容）
+
+`PatentTableMLXPipeline` 除**只出表格**外，还支持**全文档模式**：用同一套版面分析
+定位页面上的所有区域，表格区域走上面的表格链，其余区域（`doc_title` /
+`paragraph_title` / `text` / `figure_title` / `formula` / `image` / `chart` 等）
+经检测+识别后按阅读顺序渲染为 Markdown，最终拼成一整篇文档。
+
+- 阅读顺序：移植 PaddleX `sorted_layout_boxes`，支持单栏/双栏版面。
+- 文本合并：同一区域内按行读取，行距小用空格、行距大（新段落）用换行。
+- 标签映射：标题→`#`/`##`，图注→粗体，公式/图→占位（`[formula]`/`[image]`）。
+- 忽略标签默认与 PP-StructureV3 一致：`number / footnote / header / footer /
+  header_image / footer_image / aside_text`（可用 `markdown_ignore_labels` 覆盖）。
+
+```bash
+# 整份 PDF → 全文档 Markdown（表格 + 正文/标题/图注）
+pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+
+# 单页图像 → 全文档
+pixi run -e mlx-patent patent-mlx-layout-run page_02.png -o out/
+
+# 表格模式仍是默认（向后兼容）
+pixi run -e mlx-patent patent-mlx-pdf patent.pdf -o out/
+```
+
+```python
+from unified_ocr.patent_table_mlx import PatentTableMLXPipeline, PatentPipelineMLXConfig
+
+pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(device="cpu"))
+try:
+    regions = pipe.process_image_layout("page_02.png")   # 表格 + 非表格区域
+    print(PatentTableMLXPipeline.document_markdown(regions))
+
+    # 也可整份 PDF：
+    # regions = pipe.process_pdf_layout("patent.pdf")
+finally:
+    pipe.close()
+```
+
+输出：`*.mlx_layout.json`（每个区域的 `label` / `kind` / `markdown` / `box`，
+表格区域额外含 `html`）与 `*.mlx_layout.md`（拼好的整篇文档）。
+
 ### 统一框架 Python API / CLI
 
 ```python

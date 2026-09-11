@@ -145,9 +145,12 @@ patent-full = "python -m unified_ocr.patent_table full"
 patent-download = "python -m unified_ocr.patent_table download"
 
 # 组装流水线（MLX SLANeXt + PaddleX 其余环节；mlx-patent 环境）
+# --layout 开启全文档模式（额外识别非表格区域：标题/正文/图注/公式/图）
 [feature.mlx.tasks]
 patent-mlx-run = "python -m unified_ocr.patent_table_mlx.cli run"
 patent-mlx-pdf = "python -m unified_ocr.patent_table_mlx.cli pdf"
+patent-mlx-layout-run = "python -m unified_ocr.patent_table_mlx.cli run --layout"
+patent-mlx-layout-pdf = "python -m unified_ocr.patent_table_mlx.cli pdf --layout"
 
 # MCP server 任务（需 mcp 环境，模型引擎依赖 mlx/hunyuan 一并装入）
 [feature.mcp.tasks]

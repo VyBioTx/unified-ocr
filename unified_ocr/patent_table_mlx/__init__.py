@@ -7,6 +7,9 @@ safetensors keys, so weights load directly.
 
 Implemented so far:
   * ``SLANeXt`` (SLANeXt_wired / SLANeXt_wireless) — table structure recognition
+  * ``PatentTableMLXPipeline`` — assembled pipeline; table mode **and** a
+    full-document mode that additionally recognises non-table regions
+    (titles / text / captions / formulas / figures) into Markdown.
 """
 
 from __future__ import annotations
@@ -32,12 +35,19 @@ __all__ = [
     "load_slanext",
     "PatentTableMLXPipeline",
     "PatentPipelineMLXConfig",
+    "TableResult",
+    "RegionResult",
 ]
 
 
 def __getattr__(name):
     # Lazy: the pipeline pulls in PaddleX, which is an optional dependency.
-    if name in ("PatentTableMLXPipeline", "PatentPipelineMLXConfig"):
+    if name in (
+        "PatentTableMLXPipeline",
+        "PatentPipelineMLXConfig",
+        "TableResult",
+        "RegionResult",
+    ):
         from . import pipeline as _pipeline
 
         return getattr(_pipeline, name)

@@ -19,6 +19,17 @@ Paper parameters are honoured on the text detector:
 
 The MLX structure path is interchangeable with PaddleX: on the same input the
 decoded HTML is byte-identical (see ``tests/test_patent_table_mlx.py``).
+
+Two modes are available:
+
+* **table** — :meth:`PatentTableMLXPipeline.process_image` /
+  :meth:`~PatentTableMLXPipeline.process_pdf` emit only the table regions.
+* **full-document** — :meth:`PatentTableMLXPipeline.process_image_layout` /
+  :meth:`~PatentTableMLXPipeline.process_pdf_layout` additionally recognise all
+  non-table regions (titles / text / captions / formulas / figures) in reading
+  order and assemble a single Markdown document via
+  :meth:`PatentTableMLXPipeline.document_markdown`. Regions nested inside a
+  table bbox are skipped to avoid duplicating caption text.
 """
 
 from __future__ import annotations
@@ -32,6 +43,29 @@ from typing import Any, Optional
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Layout labels (PP-DocLayout_plus-L) → Markdown presentation
+# ---------------------------------------------------------------------------
+_TITLE_PREFIX = {
+    "doc_title": "# ",
+    "paragraph_title": "## ",
+    "abstract_title": "## ",
+    "reference_title": "## ",
+    "content_title": "## ",
+}
+_CAPTION_LABELS = {
+    "figure_title", "table_title", "chart_title", "figure_table_chart_title",
+}
+_VISION_LABELS = {"image", "figure", "chart", "flowchart", "seal"}
+# Formula blocks are image-based; OCR yields little text, so mark them explicitly.
+_PLACEHOLDER_LABELS = {"formula"} | _VISION_LABELS
+
+# Same default as PaddleX PP-StructureV3: these labels are not emitted to markdown.
+DEFAULT_MARKDOWN_IGNORE = (
+    "number", "footnote", "header", "header_image",
+    "footer", "footer_image", "aside_text",
+)
 
 
 @dataclass
@@ -50,6 +84,12 @@ class PatentPipelineMLXConfig:
     table_label: str = "table"
     cell_score_thresh: float = 0.3
     det_score_thresh: float = 0.0
+
+    # --- full-document (layout) mode -------------------------------------
+    # Drop layout regions below this confidence.
+    layout_score_thresh: float = 0.0
+    # Layout labels omitted from the Markdown (same defaults as PP-StructureV3).
+    markdown_ignore_labels: tuple[str, ...] = DEFAULT_MARKDOWN_IGNORE
 
     # Paper text-detection parameters
     det_limit_side_len: int = 3000
@@ -82,6 +122,28 @@ class TableResult:
         if structure is None:
             return self.html
         return structure.to_markdown()
+
+
+@dataclass
+class RegionResult:
+    """One layout region of a page in full-document mode.
+
+    Covers both table regions (``table`` set, ``label == "table"``) and
+    non-table regions (text/title/caption/formula/figure), each already
+    rendered to a Markdown fragment in :attr:`markdown`.
+    """
+
+    page_index: int = 1
+    region_index: int = 0
+    label: str = "text"
+    box: list = field(default_factory=list)          # page coords [x1, y1, x2, y2]
+    markdown: str = ""
+    texts: list = field(default_factory=list)        # matched OCR strings
+    table: Optional[TableResult] = None
+
+    @property
+    def is_table(self) -> bool:
+        return self.table is not None
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +200,72 @@ def _poly_bbox(poly) -> list:
     pts = np.array(poly, dtype=np.float32).reshape(-1, 2)
     return [float(pts[:, 0].min()), float(pts[:, 1].min()),
             float(pts[:, 0].max()), float(pts[:, 1].max())]
+
+
+def reading_order(regions: list[dict], width: float) -> list[dict]:
+    """Order layout blocks top-to-bottom, left-to-right (single/two-column aware).
+
+    Port of PaddleX ``sorted_layout_boxes``: blocks starting in the left band
+    and ending before 3/5 of the width are collected as the left column; blocks
+    starting past 2/5 of the width as the right column; a full-width block
+    flushes both columns first. This yields correct reading order for the
+    common single- and two-column patent layouts.
+    """
+    n = len(regions)
+    if n <= 1:
+        return list(regions)
+
+    boxes = sorted(regions, key=lambda r: (r["box"][1], r["box"][0]))
+    left: list[dict] = []
+    right: list[dict] = []
+    out: list[dict] = []
+    i = 0
+    while i < n:
+        b = boxes[i]
+        if b["box"][0] < width / 4 and b["box"][2] < 3 * width / 5:
+            left.append(b)
+            i += 1
+        elif b["box"][0] > 2 * width / 5:
+            right.append(b)
+            i += 1
+        else:
+            out += left
+            out += right
+            out.append(b)
+            left, right = [], []
+            i += 1
+    out += sorted(left, key=lambda r: r["box"][1])
+    out += sorted(right, key=lambda r: r["box"][1])
+    return out
+
+
+def _join_lines(lines: list[tuple[list, str]]) -> str:
+    """Join OCR lines in a region: space normally, newline on a large y-gap."""
+    lines = [(b, t) for b, t in lines if t and t.strip()]
+    if not lines:
+        return ""
+    lines.sort(key=lambda p: (p[0][1], p[0][0]))
+    heights = [max(1.0, b[3] - b[1]) for b, _ in lines]
+    median_h = sorted(heights)[len(heights) // 2]
+    parts = [lines[0][1].strip()]
+    for (pb, _), (cb, ct) in zip(lines, lines[1:]):
+        gap = cb[1] - pb[3]
+        sep = "\n" if gap > 0.8 * median_h else " "
+        parts.append(sep + ct.strip())
+    return "".join(parts).strip()
+
+
+def format_region_markdown(label: str, text: str) -> str:
+    """Render a non-table layout region to a Markdown fragment."""
+    text = (text or "").strip()
+    if label in _TITLE_PREFIX:
+        return f"{_TITLE_PREFIX[label]}{text}" if text else ""
+    if label in _CAPTION_LABELS:
+        return f"**{text}**" if text else ""
+    if label in _PLACEHOLDER_LABELS:
+        # Formula / figure regions are image-based; OCR text is usually empty.
+        return text if text else f"[{label}]"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -209,14 +337,28 @@ class PatentTableMLXPipeline:
         self._slanext = load_slanext(self.config.slanext_dir)
 
     # -- stage: layout ------------------------------------------------------
-    def _detect_tables(self, image) -> list[list]:
+    def _detect_regions(self, image) -> list[dict]:
+        """Run layout detection once, returning all regions with label + box."""
         inp = image if isinstance(image, np.ndarray) else str(image)
         out = list(self._layout.predict(inp))
         res = out[0].json["res"]
-        boxes = []
+        regions = []
         for b in res.get("boxes", []):
-            if b.get("label") == self.config.table_label:
-                boxes.append([float(v) for v in b["coordinate"]])
+            score = float(b.get("score", 1.0))
+            if score < self.config.layout_score_thresh:
+                continue
+            regions.append({
+                "label": b.get("label", ""),
+                "box": [float(v) for v in b["coordinate"]],
+                "score": score,
+            })
+        return regions
+
+    def _detect_tables(self, image) -> list[list]:
+        boxes = [
+            r["box"] for r in self._detect_regions(image)
+            if r["label"] == self.config.table_label
+        ]
         # reading order (top → bottom)
         boxes.sort(key=lambda b: (b[1], b[0]))
         return boxes
@@ -298,9 +440,61 @@ class PatentTableMLXPipeline:
 
         return get_html_result(matched, ocr_texts, tokens, row_start_index)
 
+    # -- stage: full-document (layout) helpers ------------------------------
+    @staticmethod
+    def _texts_in_box(ocr_pairs, box) -> list[tuple[list, str]]:
+        """Select OCR results whose box center lies inside a layout region."""
+        x1, y1, x2, y2 = box
+        inside = []
+        for ob, text in ocr_pairs:
+            cx = (ob[0] + ob[2]) / 2.0
+            cy = (ob[1] + ob[3]) / 2.0
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                inside.append((ob, text))
+        return inside
+
+    def _extract_table_from_region(
+        self,
+        crop: np.ndarray,
+        ocr_pairs,
+        page_index: int,
+        table_index: int,
+        page_box: list,
+    ) -> TableResult:
+        """Cell detection + MLX structure + HTML assembly for one table crop."""
+        x1, y1 = int(round(page_box[0])), int(round(page_box[1]))
+
+        cell_out = list(self._cell.predict(crop))
+        cell_res = cell_out[0].json["res"]
+        cell_boxes = [
+            [float(v) for v in c["coordinate"]]
+            for c in cell_res.get("boxes", [])
+            if float(c.get("score", 1.0)) >= self.config.cell_score_thresh
+        ]
+
+        tokens = self._slanext_tokens(crop)
+
+        local_pairs = []
+        for (ob, text) in ocr_pairs:
+            lx1, ly1, lx2, ly2 = ob[0] - x1, ob[1] - y1, ob[2] - x1, ob[3] - y1
+            if lx2 <= 0 or ly2 <= 0 or lx1 >= crop.shape[1] or ly1 >= crop.shape[0]:
+                continue
+            local_pairs.append(([lx1, ly1, lx2, ly2], text))
+
+        html = self._assemble_html(tokens, cell_boxes, local_pairs)
+        return TableResult(
+            page_index=page_index,
+            table_index=table_index,
+            box=[float(v) for v in page_box],
+            html=html,
+            structure=tokens,
+            cells=cell_boxes,
+            ocr_texts=[t for _, t in local_pairs],
+        )
+
     # -- public API ---------------------------------------------------------
     def process_image(self, image, page_index: int = 1) -> list[TableResult]:
-        """Run the full pipeline on one page image (path or BGR ndarray)."""
+        """Run the table-extraction pipeline on one page image (path or BGR ndarray)."""
         self.load()
         img_bgr = _read_bgr(image)
 
@@ -319,43 +513,130 @@ class PatentTableMLXPipeline:
             crop = img_bgr[y1:y2, x1:x2]
             if crop.size == 0:
                 continue
-
-            cell_out = list(self._cell.predict(crop))
-            cell_res = cell_out[0].json["res"]
-            cell_boxes = [
-                [float(v) for v in c["coordinate"]]
-                for c in cell_res.get("boxes", [])
-                if float(c.get("score", 1.0)) >= self.config.cell_score_thresh
-            ]
-
-            tokens = self._slanext_tokens(crop)
-
-            local_pairs = []
-            for (ob, text) in ocr_pairs:
-                lx1, ly1, lx2, ly2 = ob[0] - x1, ob[1] - y1, ob[2] - x1, ob[3] - y1
-                if lx2 <= 0 or ly2 <= 0 or lx1 >= crop.shape[1] or ly1 >= crop.shape[0]:
-                    continue
-                local_pairs.append(([lx1, ly1, lx2, ly2], text))
-
-            html = self._assemble_html(tokens, cell_boxes, local_pairs)
-
-            results.append(TableResult(
-                page_index=page_index,
-                table_index=ti,
-                box=[float(v) for v in box],
-                html=html,
-                structure=tokens,
-                cells=cell_boxes,
-                ocr_texts=[t for _, t in local_pairs],
-            ))
+            results.append(
+                self._extract_table_from_region(
+                    crop, ocr_pairs, page_index, ti, box
+                )
+            )
         return results
 
-    def process_pdf(self, pdf_path, max_pages: int | None = None) -> list[TableResult]:
-        """Render a PDF with PyMuPDF and run :meth:`process_image` on each page."""
+    # -- full-document mode (tables + non-table layout regions) -------------
+    def process_image_layout(self, image, page_index: int = 1) -> list[RegionResult]:
+        """Recognise **all** layout regions of one page, in reading order.
+
+        Tables are extracted with the table pipeline; every other region
+        (text, titles, captions, formulas, figures) is OCR'd and rendered to a
+        Markdown fragment. Returns one :class:`RegionResult` per kept region.
+        """
+        self.load()
+        img_bgr = _read_bgr(image)
+        width = img_bgr.shape[1]
+
+        regions = self._detect_regions(image)
+        ocr_pairs = self._ocr_page(img_bgr)
+        log.info("page %d: %d layout region(s), %d OCR boxes",
+                 page_index, len(regions), len(ocr_pairs))
+
+        ordered = reading_order(regions, width)
+        ignore = set(self.config.markdown_ignore_labels)
+        table_boxes = [
+            r["box"] for r in ordered
+            if r["label"] == self.config.table_label
+        ]
+
+        def _inside_table(box) -> bool:
+            # Captions/detections that fall inside a table bbox are already part
+            # of the table HTML; emitting them again would duplicate the text.
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+            return any(
+                tb[0] <= cx <= tb[2] and tb[1] <= cy <= tb[3]
+                for tb in table_boxes
+            )
+
+        results: list[RegionResult] = []
+        table_idx = 0
+        for box_info in ordered:
+            label = box_info["label"]
+            box = box_info["box"]
+            if label in ignore:
+                continue
+            if label != self.config.table_label and _inside_table(box):
+                continue
+
+            if label == self.config.table_label:
+                x1, y1, x2, y2 = [int(round(v)) for v in box]
+                x1, y1 = max(0, x1), max(0, y1)
+                crop = img_bgr[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                table = self._extract_table_from_region(
+                    crop, ocr_pairs, page_index, table_idx, box
+                )
+                table_idx += 1
+                results.append(RegionResult(
+                    page_index=page_index,
+                    region_index=len(results),
+                    label=label,
+                    box=[float(v) for v in box],
+                    markdown=table.to_markdown(),
+                    texts=table.ocr_texts,
+                    table=table,
+                ))
+            else:
+                pairs = self._texts_in_box(ocr_pairs, box)
+                text = _join_lines(pairs)
+                md = format_region_markdown(label, text)
+                if not md:
+                    continue
+                results.append(RegionResult(
+                    page_index=page_index,
+                    region_index=len(results),
+                    label=label,
+                    box=[float(v) for v in box],
+                    markdown=md,
+                    texts=[t for _, t in pairs],
+                ))
+        return results
+
+    @staticmethod
+    def document_markdown(regions: list[RegionResult], page_headers: bool = True) -> str:
+        """Assemble per-page region fragments into one Markdown document."""
+        pages: dict[int, list[RegionResult]] = {}
+        for r in regions:
+            pages.setdefault(r.page_index, []).append(r)
+
+        parts: list[str] = []
+        for pi in sorted(pages):
+            blocks = [r.markdown for r in pages[pi] if r.markdown]
+            if not blocks:
+                continue
+            body = "\n\n".join(blocks)
+            if page_headers:
+                parts.append(f"## 第 {pi} 页\n\n{body}")
+            else:
+                parts.append(body)
+        return "\n\n".join(parts)
+
+    def process_pdf_layout(
+        self, pdf_path, max_pages: int | None = None
+    ) -> list[RegionResult]:
+        """Render a PDF and run :meth:`process_image_layout` on each page."""
+        results: list[RegionResult] = []
+        for i, img in self._iter_pdf_pages(pdf_path, max_pages):
+            try:
+                results.extend(self.process_image_layout(img, page_index=i))
+            except Exception:
+                log.exception("page %d failed; skipping", i)
+        return results
+
+    # -- PDF rendering ------------------------------------------------------
+    def _iter_pdf_pages(self, pdf_path, max_pages: int | None = None):
+        """Yield ``(page_index, BGR ndarray)`` for a PDF rendered at pdf_dpi."""
+        import cv2
         import fitz  # PyMuPDF
 
         doc = fitz.open(str(pdf_path))
-        results: list[TableResult] = []
         try:
             for i, page in enumerate(doc):
                 if max_pages is not None and i >= max_pages:
@@ -364,20 +645,24 @@ class PatentTableMLXPipeline:
                 arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                     pix.height, pix.width, pix.n
                 )
-                import cv2
-
                 if pix.n == 4:
                     img = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
                 else:
                     img = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
                 log.info("PDF page %d/%d (%dx%d)", i + 1, doc.page_count,
                          pix.width, pix.height)
-                try:
-                    results.extend(self.process_image(img, page_index=i + 1))
-                except Exception:
-                    log.exception("page %d failed; skipping", i + 1)
+                yield i + 1, img
         finally:
             doc.close()
+
+    def process_pdf(self, pdf_path, max_pages: int | None = None) -> list[TableResult]:
+        """Render a PDF with PyMuPDF and run :meth:`process_image` on each page."""
+        results: list[TableResult] = []
+        for i, img in self._iter_pdf_pages(pdf_path, max_pages):
+            try:
+                results.extend(self.process_image(img, page_index=i))
+            except Exception:
+                log.exception("page %d failed; skipping", i)
         return results
 
     def close(self) -> None:
@@ -398,4 +683,9 @@ class PatentTableMLXPipeline:
         self.close()
 
 
-__all__ = ["PatentTableMLXPipeline", "PatentPipelineMLXConfig", "TableResult"]
+__all__ = [
+    "PatentTableMLXPipeline",
+    "PatentPipelineMLXConfig",
+    "TableResult",
+    "RegionResult",
+]
