@@ -211,3 +211,161 @@ def test_rec_model_name_language_switch():
         PatentPipelineMLXConfig(rec_lang="en", rec_model="my_rec")
     )
     assert custom.rec_model_name() == "my_rec"
+
+
+# ---------------------------------------------------------------------------
+# Language detection (Chinese vs. English) — pure functions + resolution.
+# ---------------------------------------------------------------------------
+
+def test_default_rec_lang_is_auto():
+    from unified_ocr.patent_table_mlx.pipeline import PatentPipelineMLXConfig
+
+    assert PatentPipelineMLXConfig().rec_lang == "auto"
+
+
+def test_script_counts_ignores_digits_and_symbols():
+    from unified_ocr.patent_table_mlx.language import script_counts
+
+    cjk, latin = script_counts("KRAS 12345 % 0.15 -> nucleotide")
+    assert latin == len("KRASnucleotide")
+    assert cjk == 0
+
+
+def test_classify_language_chinese():
+    from unified_ocr.patent_table_mlx.language import classify_language
+
+    text = "本发明提供了一种小核酸药物组合物，用于抑制KRAS基因的表达。"
+    assert classify_language(text) == "ch"
+
+
+def test_classify_language_english():
+    from unified_ocr.patent_table_mlx.language import classify_language
+
+    text = "The present invention provides siRNA molecules targeting KRAS."
+    assert classify_language(text) == "en"
+
+
+def test_classify_language_insufficient_data():
+    from unified_ocr.patent_table_mlx.language import classify_language
+
+    assert classify_language("") is None
+    assert classify_language("0.5 12:30 %") is None
+
+
+def test_classify_language_noise_does_not_trigger_chinese():
+    from unified_ocr.patent_table_mlx.language import classify_language
+
+    # one stray CJK glyph in a long English text must not flip the decision
+    text = "siRNA knockdown of KRAS in Huh7 cells (see 表 above) " * 3
+    assert classify_language(text) == "en"
+
+
+def test_detect_language_from_texts_combines_pages():
+    from unified_ocr.patent_table_mlx.language import detect_language_from_texts
+
+    pages = ["KRAS-001# 30% 27%", "发明内容：抑制效率测定结果如下表所示。"]
+    assert detect_language_from_texts(pages) == "ch"
+    assert detect_language_from_texts(["hello world", "another page"]) == "en"
+    assert detect_language_from_texts([]) is None
+
+
+def test_resolve_language_explicit_short_circuits():
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="ch"))
+    # no source needed and no models loaded when the language is explicit
+    assert pipe.resolve_language() == "ch"
+    assert pipe.detected_language == "ch"
+    assert pipe.rec_model_name() == "PP-OCRv5_server_rec"
+
+
+def test_resolve_language_uses_detected_result():
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="auto"))
+    # emulate a completed probe
+    pipe._resolved_lang = "ch"
+    assert pipe.rec_model_name() == "PP-OCRv5_server_rec"
+    assert pipe.resolve_language() == "ch"
+
+    pipe2 = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="auto"))
+    pipe2._resolved_lang = "en"
+    assert pipe2.rec_model_name() == "en_PP-OCRv4_mobile_rec"
+
+
+def test_resolve_language_explicit_model_overrides_auto():
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    pipe = PatentTableMLXPipeline(
+        PatentPipelineMLXConfig(rec_lang="auto", rec_model="my_rec")
+    )
+    assert pipe.resolve_language() == "custom"
+    assert pipe.rec_model_name() == "my_rec"
+
+
+def test_detect_language_ocr_probe_fallback(monkeypatch):
+    """Scanned/image sources fall back to the OCR probe (no text layer)."""
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="auto"))
+    monkeypatch.setattr(
+        pipe, "_probe_ocr_texts",
+        lambda imgs: [
+            "本发明提供了一种小核酸药物组合物，用于抑制KRAS基因的表达。",
+            "KRAS-001# 30%",
+        ],
+    )
+    # image path (non-PDF) → probe → Chinese
+    assert pipe.resolve_language(source="page_02.png") == "ch"
+    assert pipe.rec_model_name() == "PP-OCRv5_server_rec"
+
+
+def test_ensure_recognizer_swaps_en_after_ch_probe():
+    """After a Chinese probe, an English verdict must reload the EN model."""
+    from unified_ocr.patent_table_mlx.pipeline import (
+        PatentPipelineMLXConfig,
+        PatentTableMLXPipeline,
+    )
+
+    class FakeModel:
+        def __init__(self, name):
+            self.name = name
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(rec_lang="auto"))
+    pipe._slanext = object()  # pretend models are loaded
+    created = []
+
+    def fake_create(name, **kwargs):
+        m = FakeModel(name)
+        created.append(m)
+        return m
+
+    pipe._create_model = fake_create
+    pipe._rec = FakeModel("PP-OCRv5_server_rec")
+    pipe._loaded_rec_model = "PP-OCRv5_server_rec"
+    pipe._resolved_lang = "en"  # detection concluded English
+
+    pipe._ensure_recognizer()
+    assert pipe.rec_model_name() == "en_PP-OCRv4_mobile_rec"
+    assert [m.name for m in created] == ["en_PP-OCRv4_mobile_rec"]
+
+    # idempotent: no reload when the right model is already loaded
+    created.clear()
+    pipe._ensure_recognizer()
+    assert created == []

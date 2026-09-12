@@ -14,6 +14,12 @@ Implemented so far:
 
 from __future__ import annotations
 
+from .language import (
+    classify_language,
+    detect_language_from_pdf,
+    detect_language_from_texts,
+    script_counts,
+)
 from .slanext import SLANeXt, SLANeXtConfig
 from .weight_loader import (
     SLANEXT_CHARACTER_DICT,
@@ -33,6 +39,10 @@ __all__ = [
     "decode_structure_tokens",
     "load_mlx_weights",
     "load_slanext",
+    "classify_language",
+    "detect_language_from_pdf",
+    "detect_language_from_texts",
+    "script_counts",
     "PatentTableMLXPipeline",
     "PatentPipelineMLXConfig",
     "TableResult",

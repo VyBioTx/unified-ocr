@@ -334,14 +334,28 @@ finally:
 输出：`*.mlx_layout.json`（每个区域的 `label` / `kind` / `markdown` / `box`，
 表格区域额外含 `html` / `n_cells`）与 `*.mlx_layout.md`（拼好的整篇文档）。
 
-> **识别语言**：默认 `--rec-lang en`（论文用的英文模型 `en_PP-OCRv4_mobile_rec`）。
-> 中文专利的正文用英文模型会变成乱码，此时改用中文/多语模型：
+> **识别语言（自动判断）**：默认 `--rec-lang auto`。流水线会先判断文档语种，
+> 再选择识别模型：英文文档用论文的 `en_PP-OCRv4_mobile_rec`，中文/CJK 文档自动
+> 切到多语模型 `PP-OCRv5_server_rec`（英文模型会把中文正文渲染成乱码）。判断顺序：
+> 1. 先读 PDF 自带的文本层（数字版 PDF 免模型、瞬时）；
+> 2. 扫描件/图片没有文本层时，用多语识别器对前几页做一次 OCR 试探，按字符集判定。
+>
 > ```bash
-> # 中文文档：正文 + 表格都用 PP-OCRv5_server_rec
+> # 默认：自动判断（中文专利 → PP-OCRv5_server_rec，英文专利 → en_PP-OCRv4_mobile_rec）
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+>
+> # 强制指定语言（跳过自动判断）
 > pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang ch
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang en
 > ```
-> 也可用 `--rec-model <name>` 直接指定识别模型。表格结构识别（MLX SLANeXt）与
-> 语言无关，不受影响。
+>
+> 判定结果会写进输出 JSON 的 `config.detected_lang`。也可用
+> `--rec-model <name>` 直接指定识别模型（此时不再做语言判断），或用
+> `--lang-detect-pages N`（默认 3）调整自动判断采样的页数。表格结构识别
+> （MLX SLANeXt）与语言无关，不受影响。
+>
+> Python API：`pipe.resolve_language(source="patent.pdf")` 返回 `"en"` / `"ch"`，
+> 也可传 `sample_images=[...]` 对图片做试探。
 
 ### 统一框架 Python API / CLI
 

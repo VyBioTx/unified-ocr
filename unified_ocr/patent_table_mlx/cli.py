@@ -29,22 +29,26 @@ from pathlib import Path
 from .pipeline import PatentPipelineMLXConfig, PatentTableMLXPipeline
 
 
-def _config_dict(rec_model: str, rec_lang: str) -> dict:
+def _config_dict(rec_model: str, rec_lang: str, detected_lang: str | None = None) -> dict:
     return {
         "layout_model": "PP-DocLayout_plus-L",
         "cell_model": "RT-DETR-L_wired_table_cell_det",
         "det_model": "PP-OCRv5_server_det",
         "rec_model": rec_model,
         "rec_lang": rec_lang,
+        "detected_lang": detected_lang,
         "structure_model": "SLANeXt_wired (MLX native)",
     }
 
 
-def _results_to_dict(results, source: str, rec_model: str, rec_lang: str) -> dict:
+def _results_to_dict(
+    results, source: str, rec_model: str, rec_lang: str,
+    detected_lang: str | None = None,
+) -> dict:
     return {
         "source": str(source),
         "mode": "table",
-        "config": _config_dict(rec_model, rec_lang),
+        "config": _config_dict(rec_model, rec_lang, detected_lang),
         "tables": [
             {
                 "page_index": t.page_index,
@@ -60,11 +64,14 @@ def _results_to_dict(results, source: str, rec_model: str, rec_lang: str) -> dic
     }
 
 
-def _regions_to_dict(results, source: str, rec_model: str, rec_lang: str) -> dict:
+def _regions_to_dict(
+    results, source: str, rec_model: str, rec_lang: str,
+    detected_lang: str | None = None,
+) -> dict:
     return {
         "source": str(source),
         "mode": "layout",
-        "config": _config_dict(rec_model, rec_lang),
+        "config": _config_dict(rec_model, rec_lang, detected_lang),
         "regions": [
             {
                 "page_index": r.page_index,
@@ -123,11 +130,14 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--device", default="cpu",
                         help="PaddleX device, e.g. cpu / gpu:0")
     common.add_argument("--slanext-dir", default="models/ppocr-mlx/table_wired")
-    common.add_argument("--rec-lang", default="en",
-                        help="recognizer language: en (paper default) / ch "
-                             "(Chinese, uses PP-OCRv5_server_rec)")
+    common.add_argument("--rec-lang", default="auto",
+                        help="recognizer language: auto (default; detect from "
+                             "the document) / en (paper default) / ch (Chinese, "
+                             "uses PP-OCRv5_server_rec)")
     common.add_argument("--rec-model", default=None,
                         help="explicit recognizer model name (overrides --rec-lang)")
+    common.add_argument("--lang-detect-pages", type=int, default=3,
+                        help="pages sampled by --rec-lang auto detection")
     common.add_argument("--layout", action="store_true",
                         help="full-document mode: also recognise non-table regions")
 
@@ -155,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         "slanext_dir": args.slanext_dir,
         "pdf_dpi": getattr(args, "dpi", 300),
         "rec_lang": args.rec_lang,
+        "lang_detect_pages": args.lang_detect_pages,
     }
     if args.rec_model:
         cfg_kwargs["rec_model"] = args.rec_model
@@ -167,30 +178,34 @@ def main(argv: list[str] | None = None) -> int:
     stem = src.stem + (".mlx_layout" if args.layout else ".mlx_tables")
 
     pipe = PatentTableMLXPipeline(cfg)
-    rec_model = pipe.rec_model_name()
     try:
         if args.layout:
             if args.cmd == "run":
                 regions = pipe.process_image_layout(src)
             else:
                 regions = pipe.process_pdf_layout(src, max_pages=args.max_pages)
-            payload = _regions_to_dict(regions, src, rec_model, args.rec_lang)
+            rec_model, detected = pipe.rec_model_name(), pipe.detected_language
+            payload = _regions_to_dict(regions, src, rec_model, args.rec_lang,
+                                       detected)
             n = len(payload["regions"])
             n_tables = sum(1 for r in payload["regions"] if r["kind"] == "table")
             _write_outputs(payload, out_dir, stem)
             sys.stdout.write(
                 f"wrote {out_dir / (stem + '.json')} "
-                f"({n} region(s), {n_tables} table(s))\n"
+                f"({n} region(s), {n_tables} table(s), lang={detected})\n"
             )
         else:
             if args.cmd == "run":
                 results = pipe.process_image(src)
             else:
                 results = pipe.process_pdf(src, max_pages=args.max_pages)
-            payload = _results_to_dict(results, src, rec_model, args.rec_lang)
+            rec_model, detected = pipe.rec_model_name(), pipe.detected_language
+            payload = _results_to_dict(results, src, rec_model, args.rec_lang,
+                                       detected)
             _write_outputs(payload, out_dir, stem)
             sys.stdout.write(
-                f"wrote {out_dir / (stem + '.json')} ({len(results)} table(s))\n"
+                f"wrote {out_dir / (stem + '.json')} "
+                f"({len(results)} table(s), lang={detected})\n"
             )
         sys.stdout.flush()
     finally:

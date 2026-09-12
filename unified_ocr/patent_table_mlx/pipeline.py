@@ -15,7 +15,15 @@ Assembles the PP-StructureV3 table-extraction chain described in the paper
 
 Paper parameters are honoured on the text detector:
 ``limit_side_len=3000`` (``limit_type=min``), ``thresh=0.15``,
-``box_thresh=0.4``, ``unclip_ratio=2.0``; ``lang=en`` via the EN recognizer.
+``box_thresh=0.4``, ``unclip_ratio=2.0``.
+
+Recognition language is **auto-detected by default** (``rec_lang="auto"``):
+English documents use the paper's ``en_PP-OCRv4_mobile_rec``; Chinese/CJK
+documents switch to the multilingual ``PP-OCRv5_server_rec`` (the English model
+would render CJK body text as mojibake).  Detection first tries the PDF's
+embedded text layer, then falls back to a short OCR probe with the multilingual
+recognizer for scanned sources.  Set ``rec_lang="en"``/``"ch"`` to override, or
+``rec_model`` to pin an exact model.
 
 The MLX structure path is interchangeable with PaddleX: on the same input the
 decoded HTML is byte-identical (see ``tests/test_patent_table_mlx.py``).
@@ -76,6 +84,30 @@ REC_MODELS = {
     "multilingual": "PP-OCRv5_server_rec",
     "zh": "PP-OCRv5_server_rec",
 }
+# Recognizer used to probe an unknown document before the language is known; it
+# must handle both scripts so detection never depends on the guess.
+PROBE_REC_LANG = "ch"
+
+# "auto" (and the empty string) mean "detect the language from the document".
+_AUTO_LANGS = {"", "auto", "detect", "automatic"}
+
+
+def _is_auto(lang: Optional[str]) -> bool:
+    return (lang or "auto").strip().lower() in _AUTO_LANGS
+
+
+def _normalize_lang(lang: Optional[str]) -> Optional[str]:
+    """Map language aliases to the canonical ``REC_MODELS`` keys."""
+    if lang is None:
+        return None
+    key = lang.strip().lower()
+    if key in _AUTO_LANGS:
+        return None
+    if key in ("zh", "cn", "chinese", "chi", "multilingual", "multi"):
+        return "ch"
+    if key in ("eng", "english"):
+        return "en"
+    return key
 
 
 @dataclass
@@ -86,10 +118,14 @@ class PatentPipelineMLXConfig:
     cell_model: str = "RT-DETR-L_wired_table_cell_det"
     det_model: str = "PP-OCRv5_server_det"
     rec_model: str = "en_PP-OCRv4_mobile_rec"
-    # Language of the recognizer. "en" keeps the paper's mobile model; "ch"
-    # (aliases: zh / multilingual) switches to PP-OCRv5_server_rec so CJK body
-    # text is recognised instead of mojibake.
-    rec_lang: str = "en"
+    # Language of the recognizer. "auto" (default) detects the document language
+    # and picks the model accordingly: English → the paper's
+    # en_PP-OCRv4_mobile_rec, Chinese/CJK → PP-OCRv5_server_rec. "en" / "ch"
+    # (aliases: zh / multilingual) force a language.
+    rec_lang: str = "auto"
+    # Pages sampled by auto-detection: embedded PDF text first, then an OCR
+    # probe with the multilingual recognizer for scanned sources.
+    lang_detect_pages: int = 3
 
     # MLX SLANeXt weights (ppocr-mlx checkout)
     slanext_dir: str = "models/ppocr-mlx/table_wired"
@@ -309,19 +345,120 @@ class PatentTableMLXPipeline:
         self._slanext = None
         self._char = None
         self._mx = None
+        # Language resolution state.
+        self._resolved_lang: Optional[str] = None
+        self._loaded_rec_model: Optional[str] = None
+        self._create_model = None
+        self._rec_common: dict[str, Any] = {}
+
+    # -- language resolution -------------------------------------------------
+    @property
+    def detected_language(self) -> Optional[str]:
+        """The language chosen by auto-detection (``"en"`` / ``"ch"``), if any."""
+        return self._resolved_lang
+
+    def _rec_model_for_lang(self, lang: Optional[str]) -> str:
+        """Model name for *lang*, honouring an explicit ``rec_model`` override."""
+        explicit = self.config.rec_model
+        if explicit and explicit != REC_MODELS["en"]:
+            return explicit
+        if lang is None:
+            lang = self._resolved_lang
+        if lang is None or lang == "custom":
+            lang = _normalize_lang(self.config.rec_lang)
+        return REC_MODELS.get(lang or "en", REC_MODELS["en"])
 
     def rec_model_name(self) -> str:
         """Resolve the recognizer model from ``rec_lang`` / ``rec_model``.
 
-        An explicit non-default ``rec_model`` always wins; otherwise
-        ``rec_lang="en"`` keeps the paper's ``en_PP-OCRv4_mobile_rec`` while a
-        non-English language (e.g. ``"ch"``) selects a multilingual recognizer.
+        An explicit non-default ``rec_model`` always wins; otherwise the
+        resolved language (auto-detected by :meth:`resolve_language`) selects
+        the model.  Before detection, ``"auto"`` falls back to English.
         """
+        return self._rec_model_for_lang(self._resolved_lang)
+
+    def resolve_language(
+        self,
+        source=None,
+        sample_images: Optional[list] = None,
+        force: bool = False,
+    ) -> str:
+        """Decide the recognition language for *source* and cache it.
+
+        ``rec_lang="auto"`` triggers detection (PDF text layer, then OCR probe);
+        an explicit language or ``rec_model`` short-circuits detection.  The
+        result is cached and reused across pages of the same document.
+        """
+        if not force and self._resolved_lang:
+            return self._resolved_lang
+
         explicit = self.config.rec_model
         if explicit and explicit != REC_MODELS["en"]:
-            return explicit
-        lang = (self.config.rec_lang or "en").lower()
-        return REC_MODELS.get(lang, REC_MODELS["en"])
+            self._resolved_lang = "custom"
+            return "custom"
+
+        if not _is_auto(self.config.rec_lang):
+            self._resolved_lang = _normalize_lang(self.config.rec_lang) or "en"
+            return self._resolved_lang
+
+        detected = self._detect_language(source, sample_images)
+        self._resolved_lang = detected or "en"
+        log.info("auto language detection: %s (rec model %s)",
+                 self._resolved_lang, self.rec_model_name())
+        return self._resolved_lang
+
+    def _detect_language(self, source, sample_images) -> Optional[str]:
+        """Return ``"ch"`` / ``"en"`` / ``None`` (unknown) for the source."""
+        # 1. Embedded PDF text layer — free and exact for born-digital PDFs.
+        if source is not None and not isinstance(source, np.ndarray):
+            path = str(source)
+            if path.lower().endswith(".pdf"):
+                from .language import classify_language, extract_pdf_text
+
+                text = extract_pdf_text(path, max_pages=self.config.lang_detect_pages)
+                lang = classify_language(text)
+                if lang:
+                    log.info("PDF text layer detected language: %s", lang)
+                    return lang
+
+        # 2. OCR probe — scanned PDFs / page images.
+        images = sample_images
+        if images is None:
+            images = self._probe_images(source)
+        from .language import detect_language_from_texts
+
+        return detect_language_from_texts(self._probe_ocr_texts(images))
+
+    def _probe_images(self, source) -> list:
+        """Sample images for the OCR probe (first ``lang_detect_pages`` pages)."""
+        if source is None:
+            return []
+        if isinstance(source, np.ndarray):
+            return [source]
+        path = str(source)
+        if path.lower().endswith(".pdf"):
+            return [
+                img for _, img in self._iter_pdf_pages(
+                    source, self.config.lang_detect_pages
+                )
+            ]
+        return [source]
+
+    def _probe_ocr_texts(self, images: list) -> list[str]:
+        """OCR the probe images with a script-agnostic recognizer."""
+        if not images:
+            return []
+        self.load()
+        self._ensure_recognizer(PROBE_REC_LANG)
+        texts: list[str] = []
+        for img in images[:self.config.lang_detect_pages]:
+            try:
+                texts.extend(t for _, t in self._ocr_page(_read_bgr(img)))
+            except Exception:
+                log.exception("language probe failed on one page; skipping")
+        log.info("language probe OCR'd %d image(s), %d text box(es)",
+                 min(len(images), self.config.lang_detect_pages), len(texts))
+        return texts
 
     # -- lazy model loading -------------------------------------------------
     def load(self) -> None:
@@ -335,10 +472,12 @@ class PatentTableMLXPipeline:
 
         self._mx = mx
         self._char = build_character_list()
+        self._create_model = create_model
 
         common: dict[str, Any] = {}
         if self.config.device:
             common["device"] = self.config.device
+        self._rec_common = common
 
         log.info("Loading layout model %s", self.config.layout_model)
         self._layout = create_model(self.config.layout_model, **common)
@@ -357,12 +496,37 @@ class PatentTableMLXPipeline:
             **common,
         )
 
-        rec_model = self.rec_model_name()
-        log.info("Loading recognizer %s (lang=%s)", rec_model, self.config.rec_lang)
-        self._rec = create_model(rec_model, **common)
-
         log.info("Loading MLX SLANeXt from %s", self.config.slanext_dir)
         self._slanext = load_slanext(self.config.slanext_dir)
+
+    def _ensure_recognizer(self, lang: Optional[str] = None) -> None:
+        """Load the recognizer for *lang* (or the resolved language), if needed.
+
+        Kept out of :meth:`load` so the model can be chosen *after* language
+        auto-detection has probed the document, and swapped when the probe's
+        multilingual guess turns out not to be needed (English documents).
+        """
+        if self._slanext is None:
+            self.load()
+        model_name = self._rec_model_for_lang(lang)
+        if self._rec is not None and self._loaded_rec_model == model_name:
+            return
+        if self._rec is not None:
+            try:
+                self._rec.close()
+            except Exception:
+                pass
+            self._rec = None
+        log.info("Loading recognizer %s (lang=%s)", model_name,
+                 lang or self._resolved_lang or self.config.rec_lang)
+        self._rec = self._create_model(model_name, **self._rec_common)
+        self._loaded_rec_model = model_name
+
+    def _prepare(self, source=None) -> None:
+        """Resolve the language and load the models needed to process *source*."""
+        self.load()
+        self.resolve_language(source=source)
+        self._ensure_recognizer()
 
     # -- stage: layout ------------------------------------------------------
     def _detect_regions(self, image) -> list[dict]:
@@ -523,7 +687,7 @@ class PatentTableMLXPipeline:
     # -- public API ---------------------------------------------------------
     def process_image(self, image, page_index: int = 1) -> list[TableResult]:
         """Run the table-extraction pipeline on one page image (path or BGR ndarray)."""
-        self.load()
+        self._prepare(image)
         img_bgr = _read_bgr(image)
 
         table_boxes = self._detect_tables(image)
@@ -556,7 +720,7 @@ class PatentTableMLXPipeline:
         (text, titles, captions, formulas, figures) is OCR'd and rendered to a
         Markdown fragment. Returns one :class:`RegionResult` per kept region.
         """
-        self.load()
+        self._prepare(image)
         img_bgr = _read_bgr(image)
         width = img_bgr.shape[1]
 
@@ -650,6 +814,7 @@ class PatentTableMLXPipeline:
         self, pdf_path, max_pages: int | None = None
     ) -> list[RegionResult]:
         """Render a PDF and run :meth:`process_image_layout` on each page."""
+        self._prepare(pdf_path)
         results: list[RegionResult] = []
         for i, img in self._iter_pdf_pages(pdf_path, max_pages):
             try:
@@ -685,6 +850,7 @@ class PatentTableMLXPipeline:
 
     def process_pdf(self, pdf_path, max_pages: int | None = None) -> list[TableResult]:
         """Render a PDF with PyMuPDF and run :meth:`process_image` on each page."""
+        self._prepare(pdf_path)
         results: list[TableResult] = []
         for i, img in self._iter_pdf_pages(pdf_path, max_pages):
             try:
@@ -701,6 +867,7 @@ class PatentTableMLXPipeline:
             except Exception:
                 pass
         self._layout = self._cell = self._det = self._rec = None
+        self._loaded_rec_model = None
         self._slanext = None
 
     def __enter__(self) -> "PatentTableMLXPipeline":
