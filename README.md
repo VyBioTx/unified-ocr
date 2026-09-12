@@ -191,6 +191,172 @@ python batch_hunyuan_ocr.py            # → result_hunyuanocr.md（表格 HTML 
 
 > 三个引擎同时跑会触发 Metal GPU 超时（M4 Pro 实测），需顺序执行。
 
+### 专利表格 OCR（PP-StructureV3 专用链）
+
+`unified_ocr/patent_table` 模块按论文（FENNEC 2026, Methods → Data curation）
+配置 **PP-StructureV3** 流水线，从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+流水线由 PaddleX 实现：`PP-DocLayout_plus-L` 版面分析 + `PP-OCRv5` 整页 OCR
++ `RT-DETR-L` 表格单元格检测 + `SLANeXt` 表格结构识别，按论文参数运行
+（`det_limit_side_len=3000`、`thresh=0.15`、`box_thresh=0.4`、
+`unclip_ratio=1.5~2.0`、`lang=en`）。
+
+> 与论文「只出表格」的差异：`PPStructureV3` 完整输出**整页 markdown**（正文
+> 段落 + 表格 HTML），正文来自版面分析标记的 text 块 + 全页 OCR；只想要表格时
+> 消费 `PageResult.tables`（来自 `table_res_list`）即可。
+
+**安装（pixi，macOS）**：
+
+```bash
+# CPU（macOS Apple Silicon）
+pixi run -e patent patent-pdf patent.pdf -o result/
+```
+
+**安装（pip）**：
+
+```bash
+pip install -e ".[patent]"         # CPU
+pip install -e ".[patent-gpu]"     # Linux GPU（paddlepaddle-gpu 3.3.1）
+
+# GPU 运行（Linux + NVIDIA CUDA，实测 RTX 3060 每页 ~2-4s，较 CPU 快约 40 倍）
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300
+```
+
+**CLI 用法**：
+
+```bash
+# 单页图像 → 整页 markdown + 表格 HTML（JSON）
+python -m unified_ocr.patent_table run page.png -o page.json --device gpu:0
+
+# PDF 逐页批量（GPU 推荐）：每页一个 JSON + summary.json
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300 --unclip 2.0
+
+# 完整流程：识别 → 解析 → QC 过滤 → 序列×效应合并
+python -m unified_ocr.patent_table full page.png -o patent_result.json --device gpu:0
+```
+
+**Python API**：
+
+```python
+from unified_ocr.patent_table import PatentTablePipeline, PatentTablePipelineConfig
+
+pipe = PatentTablePipeline(PatentTablePipelineConfig(device="gpu:0"))
+try:
+    page = pipe.process_page("page_02.png")
+    print(page.markdown)       # 整页 markdown（正文 + 表格）
+    for html in page.tables:   # 每张表的 HTML（含 rowspan/colspan）
+        print(html)
+finally:
+    pipe.close()
+```
+
+**依赖说明**：paddlepaddle-gpu 3.3.1 不在 PyPI（PyPI 仅到 2.6.2），
+`patent-gpu` 特性通过 Paddle 官方 cu126 源安装
+（`https://www.paddlepaddle.org.cn/packages/stable/cu126/`）。
+GPU 推理显存约需 8GB（全模型 + 3000px 大图），显存紧张时
+传 `--gpu-mem-mb 5500` 或 `PatentTablePipelineConfig(gpu_memory_limit_mb=...)` 限制。
+
+### MLX 原生 SLANeXt（macOS Metal，ppocr-mlx 权重）
+
+除 PaddleX 路径外，`unified_ocr/patent_table_mlx` 提供了 **SLANeXt 表格结构识别**
+的纯 MLX 实现，直接加载 `plaincompute/ppocr-mlx` 的 MLX 权重
+（`model.mlx.safetensors`，官方 PaddleX 权重的 MLX 转换），在 Apple Silicon
+的 Metal GPU 上运行，无需 Paddle/PaddleX。
+
+- 参数名与 ppocr-mlx safetensors 键一一对应，权重按键直接加载（`strict=True`
+  会在任何键/形状不匹配时报错）。
+- 已在 M4 Pro 上与 PaddleX 官方 `SLANeXt_wired` 逐 token 对齐验证：
+  同一输入下 183/183 结构 token 一致，解码出的表格 HTML 与 PaddleX **逐字节相同**。
+- 完整流水线所需的其余模块（版面分析、文本检测/识别、表格单元格检测）在
+  ppocr-mlx 中对应 `doclayoutv3/`、`det/`、`rec/`、`en_rec/`、
+  `table_cell_wired/` 等目录。
+
+```bash
+# 下载全部 ppocr-mlx 权重（约 3.8 GB，HuggingFace 可达时）
+python -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('plaincompute/ppocr-mlx', local_dir='models/ppocr-mlx')"
+```
+
+```python
+import mlx.core as mx
+from unified_ocr.patent_table_mlx import load_slanext, decode_structure
+from unified_ocr.patent_table_mlx.preprocess import preprocess_image
+
+model = load_slanext("models/ppocr-mlx/table_wired")
+x = preprocess_image("table.png")                 # CHW 3x512x512 (BGR, PaddleX 同款预处理)
+probs = model(mx.array(x[None]))                  # [1, seq, 50]
+ids = [int(v) for v in mx.argmax(probs[0], axis=-1)]
+print(decode_structure(ids))                      # <html><body><table>…</table></body></html>
+```
+
+> 依赖：`pixi run -e mlx …`（mlx / mlx-lm / mlx-vlm）。测试：`pixi run -e mlx-test pytest tests/test_patent_table_mlx.py`
+> （无 MLX 的环境会自动 skip 该模块）。
+
+#### 全文档模式（表格 + 非表格内容）
+
+`PatentTableMLXPipeline` 除**只出表格**外，还支持**全文档模式**：用同一套版面分析
+定位页面上的所有区域，表格区域走上面的表格链，其余区域（`doc_title` /
+`paragraph_title` / `text` / `figure_title` / `formula` / `image` / `chart` 等）
+经检测+识别后按阅读顺序渲染为 Markdown，最终拼成一整篇文档。
+
+- 阅读顺序：移植 PaddleX `sorted_layout_boxes`，支持单栏/双栏版面。
+- 文本合并：同一区域内按行读取，行距小用空格、行距大（新段落）用换行。
+- 标签映射：标题→`#`/`##`，图注→粗体，公式/图→占位（`[formula]`/`[image]`）。
+- 忽略标签默认与 PP-StructureV3 一致：`number / footnote / header / footer /
+  header_image / footer_image / aside_text`（可用 `markdown_ignore_labels` 覆盖）。
+
+```bash
+# 整份 PDF → 全文档 Markdown（表格 + 正文/标题/图注）
+pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+
+# 单页图像 → 全文档
+pixi run -e mlx-patent patent-mlx-layout-run page_02.png -o out/
+
+# 表格模式仍是默认（向后兼容）
+pixi run -e mlx-patent patent-mlx-pdf patent.pdf -o out/
+```
+
+```python
+from unified_ocr.patent_table_mlx import PatentTableMLXPipeline, PatentPipelineMLXConfig
+
+pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(device="cpu"))
+try:
+    regions = pipe.process_image_layout("page_02.png")   # 表格 + 非表格区域
+    print(PatentTableMLXPipeline.document_markdown(regions))
+
+    # 也可整份 PDF：
+    # regions = pipe.process_pdf_layout("patent.pdf")
+finally:
+    pipe.close()
+```
+
+输出：`*.mlx_layout.json`（每个区域的 `label` / `kind` / `markdown` / `box`，
+表格区域额外含 `html` / `n_cells`）与 `*.mlx_layout.md`（拼好的整篇文档）。
+
+> **识别语言（自动判断）**：默认 `--rec-lang auto`。流水线会先判断文档语种，
+> 再选择识别模型：英文文档用论文的 `en_PP-OCRv4_mobile_rec`，中文/CJK 文档自动
+> 切到多语模型 `PP-OCRv5_server_rec`（英文模型会把中文正文渲染成乱码）。判断顺序：
+> 1. 先读 PDF 自带的文本层（数字版 PDF 免模型、瞬时）；
+> 2. 扫描件/图片没有文本层时，用多语识别器对前几页做一次 OCR 试探，按字符集判定。
+>
+> ```bash
+> # 默认：自动判断（中文专利 → PP-OCRv5_server_rec，英文专利 → en_PP-OCRv4_mobile_rec）
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+>
+> # 强制指定语言（跳过自动判断）
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang ch
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang en
+> ```
+>
+> 判定结果会写进输出 JSON 的 `config.detected_lang`。也可用
+> `--rec-model <name>` 直接指定识别模型（此时不再做语言判断），或用
+> `--lang-detect-pages N`（默认 3）调整自动判断采样的页数。表格结构识别
+> （MLX SLANeXt）与语言无关，不受影响。
+>
+> Python API：`pipe.resolve_language(source="patent.pdf")` 返回 `"en"` / `"ch"`，
+> 也可传 `sample_images=[...]` 对图片做试探。
+
 ### 统一框架 Python API / CLI
 
 ```python
