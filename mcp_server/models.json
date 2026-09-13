@@ -1,0 +1,17 @@
+{
+  "default_model": "glm-ocr",
+  "models": {
+    "glm-ocr": {
+      "engine": "glm-ocr",
+      "path": "models/GLM-OCR"
+    },
+    "paddleocr-vl": {
+      "engine": "paddleocr-vl",
+      "path": "models/PaddleOCR-VL"
+    },
+    "hunyuanocr": {
+      "engine": "hunyuanocr",
+      "path": "models/HunyuanOCR"
+    }
+  }
+}

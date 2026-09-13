@@ -16,9 +16,11 @@ MCP tools:
   - list_tasks()                   -> all tasks with status
   - model_status()                 -> model loaded? device? load time
 
-The model to use is chosen per task via `model` (engine id or model path). If
-omitted it defaults to `glm-ocr`. Supported engine ids: glm-ocr (default),
-paddleocr-vl, hunyuanocr.
+The model to use is chosen per task via `model`, but clients only pass a
+**model name**. The name -> (engine, weights path/HF id) mapping lives in a
+server-side config file (`mcp_server/models.json`), so filesystem paths and
+directory structure are never exposed to — or accepted from — MCP clients.
+If `model` is omitted it defaults to the config's `default_model`.
 
 Task queue: OCR jobs run on a bounded thread pool. `MAX_OCR_PARALLEL` env var
 sets the maximum number of concurrently-running OCR tasks (default 1). OCR
@@ -31,6 +33,7 @@ Env vars:
   MCP_UPLOAD_DIR        uploaded file dir         (default <repo>/data/uploads)
   MCP_RESULT_DIR        result file dir           (default <repo>/data/results)
   MCP_PUBLIC_BASE_URL   base URL for download links (default http://localhost:8802)
+  MCP_MODEL_CONFIG      server-side model config  (default <repo>/mcp_server/models.json)
 
 Run:
   pixi run -e mcp mcp            # starts HTTP MCP server
@@ -49,6 +52,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -72,7 +76,14 @@ PUBLIC_BASE_URL = os.environ.get(
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf"}
 MAX_UPLOAD_BYTES = int(os.environ.get("MCP_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 
+# Built-in fallback default, used only when the config omits `default_model`.
 DEFAULT_MODEL = "glm-ocr"
+
+# Server-side model config: maps a public model NAME -> {engine, path}.
+# Paths live here (server-side) and are never accepted from MCP clients.
+MODEL_CONFIG_PATH = Path(
+    os.environ.get("MCP_MODEL_CONFIG", str(REPO_DIR / "mcp_server" / "models.json"))
+).expanduser()
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,75 +96,170 @@ if not log.handlers:
 log.setLevel(os.environ.get("MCP_LOG_LEVEL", "INFO").upper())
 
 
+# ── Server-side model config ───────────────────────────────────────────
+# The client sends only a model NAME. This module resolves that name to an
+# (engine, path) pair using the server-side config, so no filesystem paths
+# ever cross the MCP boundary. Config schema (JSON)::
+#
+#   {
+#     "default_model": "glm-ocr",
+#     "models": {
+#       "glm-ocr":      {"engine": "glm-ocr",      "path": "models/GLM-OCR"},
+#       "paddleocr-vl": {"engine": "paddleocr-vl", "path": "models/PaddleOCR-VL"},
+#       "hunyuanocr":   {"engine": "hunyuanocr",   "path": "models/HunyuanOCR"}
+#     }
+#   }
+#
+# `path` is optional: a relative path is resolved against the repo root when it
+# exists, otherwise it is passed through (e.g. a HF repo id); an empty path
+# uses the backend's own default model. The config path can be overridden with
+# the MCP_MODEL_CONFIG env var.
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    """One configured model: public name + engine + optional weights path/HF id."""
+
+    name: str
+    engine: str
+    path: str = ""
+
+
+_model_config_cache: Optional[tuple[str, dict[str, ModelEntry]]] = None
+
+
+def _fallback_entries() -> dict[str, ModelEntry]:
+    """No config file -> expose registry engine ids with their default weights."""
+    from unified_ocr import list_engines
+
+    return {s.id: ModelEntry(name=s.id, engine=s.id) for s in list_engines()}
+
+
+def _read_model_config(path: Path) -> tuple[str, dict[str, ModelEntry]]:
+    """Parse the JSON model config, returning (default_name, entries).
+
+    Missing/invalid config falls back to the registered engines so the server
+    still starts, but no client-supplied path is ever honored.
+    """
+    raw: Any = None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        log.warning("model config not found: %s; falling back to engine defaults", path)
+    except (OSError, ValueError) as exc:
+        log.warning("cannot parse model config %s: %s; falling back", path, exc)
+
+    entries: dict[str, ModelEntry] = {}
+    default_name = ""
+    if isinstance(raw, dict):
+        default_name = str(raw.get("default_model") or "").strip()
+        models_raw = raw.get("models")
+        if not isinstance(models_raw, dict):
+            models_raw = {k: v for k, v in raw.items() if k != "default_model"}
+        for name, spec in models_raw.items():
+            name = str(name).strip()
+            if not name:
+                continue
+            if isinstance(spec, str):
+                entries[name] = ModelEntry(name=name, engine=spec.strip() or name)
+            elif isinstance(spec, dict):
+                engine = str(spec.get("engine") or name).strip()
+                path_val = str(spec.get("path") or "").strip()
+                entries[name] = ModelEntry(name=name, engine=engine, path=path_val)
+            else:
+                log.warning("ignoring invalid model config entry %r", name)
+
+    if not entries:
+        return DEFAULT_MODEL, _fallback_entries()
+    if default_name not in entries:
+        default_name = DEFAULT_MODEL if DEFAULT_MODEL in entries else next(iter(entries))
+    return default_name, entries
+
+
+def _get_model_config() -> tuple[str, dict[str, ModelEntry]]:
+    """Cached (default_name, entries) view of the server-side config."""
+    global _model_config_cache
+    if _model_config_cache is None:
+        _model_config_cache = _read_model_config(MODEL_CONFIG_PATH)
+    return _model_config_cache
+
+
+def reload_model_config() -> None:
+    """Drop the cached config so the next lookup re-reads MODEL_CONFIG_PATH."""
+    global _model_config_cache
+    _model_config_cache = None
+
+
+def _default_model_name() -> str:
+    return _get_model_config()[0]
+
+
+def _allowed_model_names() -> list[str]:
+    return sorted(_get_model_config()[1])
+
+
+def _resolve_model_path(path: str) -> str:
+    """Resolve a configured path: repo-relative if it exists, else pass through."""
+    if not path:
+        return ""
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return str(p)
+    candidate = REPO_DIR / p
+    if candidate.exists():
+        return str(candidate)
+    return path
+
+
+def _resolve_model_spec(model: str) -> tuple[str, str, str]:
+    """Resolve a client-supplied model NAME into (name, engine, path).
+
+    Only names present in the server-side config are accepted. Filesystem
+    paths, HF ids, and "engine=path" strings sent by clients are rejected.
+    """
+    default_name, entries = _get_model_config()
+    name = (model or "").strip() or default_name
+    if name not in entries:
+        raise ValueError(
+            f"unknown model {name!r}; allowed models: {', '.join(_allowed_model_names())}"
+        )
+    entry = entries[name]
+    return entry.name, entry.engine, _resolve_model_path(entry.path)
+
+
 # ── Model registry (shared, lazy, serialized) ──────────────────────────
-# Keyed by the model spec string the agent passed to start_ocr_task.
-# We keep several backends alive (one per distinct model) so switching model
-# between tasks does not reload weights; inference is still serialized through
-# a single lock to keep the Metal GPU busy with only one job at a time.
+# Keyed by the resolved model NAME. We keep several backends alive (one per
+# distinct model) so switching model between tasks does not reload weights;
+# inference is still serialized through a single lock to keep the Metal GPU
+# busy with only one job at a time.
 _model_backends: dict[str, Any] = {}
 _model_load_time: dict[str, Optional[float]] = {}
 _model_lock = threading.Lock()
 _infer_lock = threading.Lock()  # serialize inference across all models
 
 
-def _parse_model_spec(model: str) -> tuple[str, str]:
-    """Normalize a model argument into (engine_id, path_or_hf_id).
-
-    Supported forms:
-      - engine id:            "glm-ocr" | "paddleocr-vl" | "hunyuanocr"
-      - "engine=path":        "glm-ocr=./models/GLM-OCR" (explicit local dir / HF id)
-      - bare path / HF id:    "./models/GLM-OCR" | "mlx-community/GLM-OCR-bf16"
-                              -> engine inferred from directory name prefix.
-    """
-    model = (model or DEFAULT_MODEL).strip()
-    if not model:
-        model = DEFAULT_MODEL
-    if "=" in model:
-        engine, _, path = model.partition("=")
-        engine = engine.strip()
-        path = path.strip() or None
-        return engine, path or ""
-
-    from unified_ocr import list_engines
-
-    ids = {s.id for s in list_engines()}
-    if model in ids:
-        return model, ""
-
-    lower = model.lower()
-    if lower.startswith("glm"):
-        return "glm-ocr", model
-    if lower.startswith("paddle") or lower.startswith("paddleocr"):
-        return "paddleocr-vl", model
-    if "hunyuan" in lower:
-        return "hunyuanocr", model
-    # Unknown -> keep the default engine and treat the string as a model path/id.
-    return DEFAULT_MODEL, model
-
-
 def _ensure_model(model: str) -> Any:
-    """Lazy-load (and cache) the backend for a model spec. Returns a backend."""
+    """Lazy-load (and cache) the configured backend for a model name."""
     global _model_backends, _model_load_time
-    key = model.strip() or DEFAULT_MODEL
-    if key in _model_backends:
-        return _model_backends[key]
+    name, engine, path = _resolve_model_spec(model)
+    if name in _model_backends:
+        return _model_backends[name]
     with _model_lock:
-        if key in _model_backends:
-            return _model_backends[key]
-        engine, path = _parse_model_spec(key)
+        if name in _model_backends:
+            return _model_backends[name]
 
         from unified_ocr import create_backend
 
         kwargs: dict[str, Any] = {}
         if path:
             kwargs["model"] = path
-        log.info("loading model spec %r (engine=%s path=%r)", key, engine, path)
+        log.info("loading model %r (engine=%s)", name, engine)
         t0 = time.time()
         backend = create_backend(engine, **kwargs)
         backend.load()
-        _model_load_time[key] = time.time() - t0
-        _model_backends[key] = backend
-        log.info("model %r ready in %.1fs", key, _model_load_time[key])
+        _model_load_time[name] = time.time() - t0
+        _model_backends[name] = backend
+        log.info("model %r ready in %.1fs", name, _model_load_time[name])
         return backend
 
 
@@ -215,7 +321,7 @@ def _run_task(task_id: str, file_id: str, filename: str, options: dict) -> None:
         if not upload_path.exists():
             raise FileNotFoundError(f"uploaded file not found: {upload_path}")
 
-        model = options.get("model") or DEFAULT_MODEL
+        model = options.get("model") or _default_model_name()
         max_tokens = int(options.get("max_tokens", 8192))
 
         task["message"] = "converting/reading input"
@@ -298,8 +404,9 @@ mcp = FastMCP(
         "'file' to obtain a file_id, 3) call start_ocr_task(file_id, model=...) to "
         "enqueue OCR and get a task_id, 4) poll get_task_status(task_id) until status "
         "is 'done', then use result.download_url. Results are clean Markdown without "
-        "bbox. The 'model' argument accepts an engine id (glm-ocr, paddleocr-vl, "
-        "hunyuanocr) or 'engine=path'; if omitted it defaults to glm-ocr."
+        "bbox. The 'model' argument MUST be one of the model names returned by "
+        "upload_instructions().available_models (resolved server-side); filesystem "
+        "paths are not accepted. If omitted it uses the configured default model."
     ),
 )
 
@@ -310,8 +417,22 @@ def upload_instructions() -> dict:
 
     The agent should POST a multipart request to the returned URL with the file in
     a field named 'file'. The server replies with {"file_id": "...", "filename": ...}.
+    `available_models` lists the model names accepted by start_ocr_task.
     """
     from unified_ocr import list_engines
+
+    engine_meta = {s.id: s for s in list_engines()}
+    default_name, entries = _get_model_config()
+    available_models = []
+    for name in sorted(entries):
+        entry = entries[name]
+        meta = engine_meta.get(entry.engine)
+        available_models.append({
+            "name": name,
+            "engine": entry.engine,
+            "display_name": meta.display_name if meta else entry.engine,
+            "accelerator": meta.accelerator if meta else "unknown",
+        })
 
     return {
         "upload_url": f"{PUBLIC_BASE_URL}/upload",
@@ -320,11 +441,8 @@ def upload_instructions() -> dict:
         "content_type": "multipart/form-data",
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
         "max_size_bytes": MAX_UPLOAD_BYTES,
-        "default_model": DEFAULT_MODEL,
-        "available_models": [
-            {"id": s.id, "model_hint": s.model_hint, "accelerator": s.accelerator}
-            for s in list_engines()
-        ],
+        "default_model": default_name,
+        "available_models": available_models,
         "example_curl": f'curl -F "file=@/path/to/doc.pdf" {PUBLIC_BASE_URL}/upload',
     }
 
@@ -332,15 +450,16 @@ def upload_instructions() -> dict:
 @mcp.tool()
 def start_ocr_task(
     file_id: str,
-    model: str = DEFAULT_MODEL,
+    model: str = "",
     max_tokens: int = 8192,
 ) -> dict:
     """Start an OCR task for an uploaded file (image or PDF).
 
     Args:
         file_id: id returned by POST /upload.
-        model: engine id or 'engine=path'. Engine ids: glm-ocr (default),
-            paddleocr-vl, hunyuanocr. A bare path/HF id is also accepted.
+        model: a model name from upload_instructions().available_models
+            (e.g. glm-ocr). Resolved server-side; filesystem paths are NOT
+            accepted. Defaults to the configured default model.
         max_tokens: max tokens per page (default 8192).
 
     Returns the task_id; poll get_task_status(task_id) for progress.
@@ -351,12 +470,17 @@ def start_ocr_task(
     upload_path = matches[0]
     filename = upload_path.name[len(file_id) + 1:]
 
-    task_id = _submit_task(file_id, filename, {"model": model, "max_tokens": max_tokens})
+    try:
+        name, _engine, _path = _resolve_model_spec(model)
+    except ValueError as exc:
+        return {"error": str(exc), "allowed_models": _allowed_model_names()}
+
+    task_id = _submit_task(file_id, filename, {"model": name, "max_tokens": max_tokens})
     return {
         "task_id": task_id,
         "file_id": file_id,
         "filename": filename,
-        "model": model,
+        "model": name,
         "status": "queued",
         "progress": 0,
         "note": "poll get_task_status(task_id) for progress and download_url when done",
@@ -501,5 +625,7 @@ if __name__ == "__main__":
     print(f"[mcp]   MCP endpoint:    http://{MCP_HOST}:{MCP_PORT}/mcp")
     print(f"[mcp]   Upload endpoint: http://{MCP_HOST}:{MCP_PORT}/upload")
     print(f"[mcp]   MAX_OCR_PARALLEL={max(1, MAX_OCR_PARALLEL)}")
-    print(f"[mcp]   default model:   {DEFAULT_MODEL}")
+    print(f"[mcp]   model config:    {MODEL_CONFIG_PATH}")
+    print(f"[mcp]   default model:   {_default_model_name()}")
+    print(f"[mcp]   models:          {', '.join(_allowed_model_names()) or '(none)'}")
     uvicorn.run(build_app(), host=MCP_HOST, port=MCP_PORT, log_level="info")

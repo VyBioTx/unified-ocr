@@ -121,20 +121,34 @@ pixi run -e mcp mcp
 - `MAX_OCR_PARALLEL` — 并行 OCR 任务数上限（默认 `1`；内置任务队列，批量识别按此并发执行）
 - `MCP_UPLOAD_DIR` / `MCP_RESULT_DIR` — 上传 / 结果目录（默认 `<repo>/data/uploads|results`）
 - `MCP_PUBLIC_BASE_URL` — 生成下载链接用的外部地址（默认 `http://localhost:8802`）
+- `MCP_MODEL_CONFIG` — 服务端模型配置文件路径（默认 `<repo>/mcp_server/models.json`）
 
 MCP 工具与调用流程（图片 / PDF 均可，输出为**去 bbox 的标准 Markdown**）：
 
-1. `upload_instructions()` — 获取上传地址与格式，同时列出可用模型
+1. `upload_instructions()` — 获取上传地址与格式，同时列出可用模型**名称**
 2. `POST /upload`（multipart 字段 `file`）→ 返回 `file_id`
 3. `start_ocr_task(file_id, model=..., max_tokens=...)` — 提交识别任务 → 返回 `task_id`
 4. `get_task_status(task_id)` — 轮询进度；`done` 后返回 `result.download_url` 下载结果
 5. `list_tasks()` / `model_status()` — 任务列表 / 模型加载状态
 
-**`model` 参数**（`start_ocr_task`，默认 `glm-ocr`）：
+**`model` 参数**（`start_ocr_task`，默认取配置里的 `default_model`）：
 
-- 引擎 id：`glm-ocr`（默认）/ `paddleocr-vl` / `hunyuanocr`
-- 指定路径：`engine=path`，如 `glm-ocr=./models/GLM-OCR`、`hunyuanocr=./models/HunyuanOCR`
-- 裸路径 / HF id：如 `mlx-community/GLM-OCR-bf16`（按目录名前缀自动推断引擎）
+- 只接受**服务端配置中已声明的模型名称**（如 `glm-ocr` / `paddleocr-vl` / `hunyuanocr`）。
+- 客户端传路径、HF id 或 `engine=path` 一律拒绝（返回 `error` + `allowed_models`），避免暴露服务器目录结构。
+- 模型名称 → 引擎 + 权重路径的映射集中在服务端 `mcp_server/models.json`：
+
+```json
+{
+  "default_model": "glm-ocr",
+  "models": {
+    "glm-ocr":      { "engine": "glm-ocr",      "path": "models/GLM-OCR" },
+    "paddleocr-vl": { "engine": "paddleocr-vl", "path": "models/PaddleOCR-VL" },
+    "hunyuanocr":   { "engine": "hunyuanocr",   "path": "models/HunyuanOCR" }
+  }
+}
+```
+
+`path` 可省略（用后端默认权重）；相对路径在仓库根下存在时按仓库根解析，否则原样透传（如 HF repo id）；也可用 `MCP_MODEL_CONFIG` 指向自定义配置。
 
 每个 model 首次使用时懒加载并缓存（同一进程内切换模型不会重复加载权重）；推理通过单一锁串行化，避免多个大模型并发占用 Metal GPU。
 
