@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..base import EngineSpec, OCRBackend
+from ..base import EngineSpec, OCRBackend, generation_text
 from ..models import OCRResult
 from ..registry import register
 
@@ -90,13 +90,14 @@ class MLXVLMBackend(OCRBackend):
         if options:
             log.warning("未能识别的选项被忽略: %s", sorted(options))
 
-        text = generate(
+        out = generate(
             self._model,
             self._processor,
             prompt,
             image=str(image),
             max_tokens=int(max_tokens),
         )
+        text = generation_text(out)
         return OCRResult.from_text(
             engine=self.spec.id,
             text=text,

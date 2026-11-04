@@ -5,6 +5,10 @@
       "engine": "glm-ocr",
       "path": "models/GLM-OCR"
     },
+    "minicpm-ocr": {
+      "engine": "minicpm-ocr",
+      "path": "models/MiniCPM-OCR-1.0"
+    },
     "paddleocr-vl": {
       "engine": "paddleocr-vl",
       "path": "models/PaddleOCR-VL"

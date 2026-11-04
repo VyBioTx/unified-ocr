@@ -15,6 +15,16 @@ from typing import Any
 from .models import OCRResult
 
 
+def generation_text(out: Any) -> str:
+    """取 mlx-vlm 生成结果里的文本。
+
+    新版 mlx-vlm 返回 ``GenerationResult``（``.text``），旧版直接返回 str；
+    后端固定从 main 安装，两种形态都得认。
+    """
+    text = getattr(out, "text", out)
+    return text if isinstance(text, str) else str(text)
+
+
 @dataclass
 class EngineSpec:
     """引擎静态信息，供 `unified-ocr list-engines` 与文档展示。"""

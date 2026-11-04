@@ -6,6 +6,7 @@
 |------|----------|----------|--------------|
 | `glm-ocr` | [zai-org/GLM-OCR](https://github.com/zai-org/GLM-OCR)（代码 Apache-2.0 / 模型 MIT） | **mlx-vlm（MLX/Metal）** | ✅ 官方提供 MLX 部署指南 |
 | `paddleocr-vl` | [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)（Apache-2.0） | **mlx-vlm（MLX/Metal）** | ✅ mlx-vlm 原生集成 |
+| `minicpm-ocr` | [OpenBMB/MiniCPM-OCR](https://github.com/OpenBMB/MiniCPM-OCR)（Apache-2.0） | **mlx-vlm（MLX/Metal）** | ✅ mlx-vlm 已内置 `minicpm_ocr` 架构 |
 | `hunyuanocr` | [Tencent-Hunyuan/HunyuanOCR](https://github.com/Tencent-Hunyuan/HunyuanOCR)（v1.0 分支） | **transformers 原生推理（MPS）** | ✅ 1B 参数，PyTorch MPS 可跑 |
 | `dots-mocr` | [rednote-hilab/dots.mocr](https://github.com/rednote-hilab/dots.mocr)（原 dots.ocr，自定义许可） | **transformers 原生推理（MPS/CPU）** | ✅ 1.7B VLM，eager attention 免 flash-attn，MPS 可跑 |
 | `dots-mocr-mlx` | 同上 | **mlx-vlm（MLX/Metal）** | ⚠️ 注册已就绪；dots.vit（NaViT）架构 mlx-vlm 尚未支持，见[下文](#dotsmocr--mlx-状态) |
@@ -48,6 +49,8 @@ pixi run list-engines
 pixi install -e mlx
 #   注意：mlx-vlm 必须从 git 安装（PyPI 版尚未内置 GLM-OCR / PaddleOCR-VL 架构），
 #   且要求 transformers>=5.0。
+#   pixi.toml 里 mlx-vlm 的 rev 钉在 0.7.11（含 minicpm_ocr / minicpm_ocr_jev）；
+#   改了 rev 之后 `pixi install -e mlx` 会重新生成 pixi.lock —— 在 macOS 上跑一次并提交。
 
 # 3. HunyuanOCR 引擎（transformers 原生，可选）
 pixi install -e hunyuan   # torch + transformers + accelerate
@@ -191,6 +194,61 @@ python run_hunyuan_ocr.py ./models/HunyuanOCR ./page.png 4096
 # dots.mocr（transformers 原生，MPS/CPU）
 unified-ocr run page.png -e dots-mocr --model dots-mocr=./weights/DotsMOCR
 ```
+
+### MiniCPM-OCR 1.0（MLX）+ Jev 可信度打分
+
+`minicpm-ocr` 引擎走 mlx-vlm 的 `minicpm_ocr` 移植（视觉塔 SigLIP + Qwen3.5
+24 层混合注意力主干），和 `glm-ocr` 是同一套加载/生成路径，切换只改引擎 id。
+`unified-ocr qc` 在此之上接 MiniCPM-OCR Jev —— 输出可信度而非文本的判别模型。
+
+| 组件 | 权重（MLX） | 体积 | 说明 |
+|------|-------------|------|------|
+| 解析 MiniCPM-OCR 1.0 | `nativ-community/MiniCPM-OCR-1.0-bf16` | 2.60 GB | **默认**；4bit 版 `-4bit` 2.16 GB 只省 0.44 GB |
+| 解析 4bit | `nativ-community/MiniCPM-OCR-1.0-4bit` | 2.16 GB | 只量化 96 个线性层，密集页字符相似度 0.76~0.83 |
+| 质检 Jev | `nativ-community/MiniCPM-OCR-Jev-4bit` | 1.72 GB | bf16 版 4.43 GB，量化收益大 |
+
+```bash
+# 权重（走 hf-mirror 时加 HF_ENDPOINT=https://hf-mirror.com）
+hf download nativ-community/MiniCPM-OCR-1.0-bf16 --local-dir models/MiniCPM-OCR-1.0
+hf download nativ-community/MiniCPM-OCR-Jev-4bit --local-dir models/MiniCPM-OCR-Jev
+
+# 识别
+pixi run -e mlx ocr-run page.png -e minicpm-ocr --model minicpm-ocr=models/MiniCPM-OCR-1.0
+
+# 识别 + 可信度打分（整页分数写进 metadata.qc.jev，不给阈值就只出分数）
+pixi run -e mlx ocr-qc page.png -e glm-ocr --jev-model models/MiniCPM-OCR-Jev
+
+# 直接对比 GLM-OCR 与 MiniCPM-OCR
+pixi run -e mlx ocr-run page.png -e glm-ocr -e minicpm-ocr -o markdown
+```
+
+```python
+from unified_ocr import OCR
+from unified_ocr.qc import JevScorer, apply_qc
+
+result = OCR().run("page.png", engines=["minicpm-ocr"])[0]
+info = apply_qc(result, "page.png", JevScorer("models/MiniCPM-OCR-Jev"), threshold=0.5)
+print(info["prob_consistent"], info["needs_review"])
+```
+
+四点使用约束（都会直接影响结论，别跳过）：
+
+1. **绝对分数不能当闸门，只能同块排序。** M4 Pro 实测：完全正确的识别结果整页
+   只有 **0.0316**、表格块 **0.199**；改错一个数字掉到 0.00003、多重复一行 0.007。
+   区分度有 2~4 个数量级，但「对的」也只有 0.03~0.2，任何固定 0.5 阈值都会把正确
+   结果全拦下。主因是 `qc.py` 用 Pillow 把纯文本画成图，丢了表格边框和列对齐，
+   而 Jev 比的是版式 + 字符。要当闸门，先换 HTML/Chromium 渲染再按业务样本标定分位阈值。
+2. **阈值必须自己标定。** 即使换成高保真渲染，分数也依赖字体/版本，官方明确说
+   没有通用默认阈值；4bit 与 bf16 的最大概率差还有 0.073。
+3. **整页长边压到 ~1200px。** 1240×1500 的整页会在同一行表格上无限重复输出，
+   1240×1200 和 930×1125 都正常。官方 `mlx_vlm.generate` 命令行同样复现，属模型侧
+   输入尺寸相关的解码退化，不是适配层写法问题。
+4. **`qc` 只做整页打分。** VLM 引擎的 `OCRResult` 没有逐块 bbox，切块打分需要
+   版面分析结果（`patent_table_mlx` 的 regions 带 box，可自行 crop 后调
+   `JevScorer.score(crop, text)`）。
+
+另外：**Jev 不能当生成模型用**。它没有 `lm_head`，只输出 `[2, 2048]` 打分头结果，
+所以不进 `start_ocr_task` 的模型路由，只走 `qc` 子命令或 `JevScorer`。
 
 ### PDF 批量识别（专利/文献）
 
