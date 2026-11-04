@@ -60,7 +60,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="覆盖识别引擎的模型路径")
     q.add_argument("--jev-model", default=None, help="Jev 权重路径 / HF id")
     q.add_argument("--threshold", type=float, default=None,
-                   help="低于该分数标记 needs_review（需按自己样本标定）")
+                   help="低于该分数标记 needs_review（Pillow 渲染下绝对分不可靠，"
+                        "须按自己业务样本标定，勿直接填 0.5）")
     return p
 
 

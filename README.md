@@ -49,6 +49,8 @@ pixi run list-engines
 pixi install -e mlx
 #   注意：mlx-vlm 必须从 git 安装（PyPI 版尚未内置 GLM-OCR / PaddleOCR-VL 架构），
 #   且要求 transformers>=5.0。
+#   pixi.toml 里 mlx-vlm 的 rev 钉在 0.7.11（含 minicpm_ocr / minicpm_ocr_jev）；
+#   改了 rev 之后 `pixi install -e mlx` 会重新生成 pixi.lock —— 在 macOS 上跑一次并提交。
 
 # 3. HunyuanOCR 引擎（transformers 原生，可选）
 pixi install -e hunyuan   # torch + transformers + accelerate
@@ -213,9 +215,8 @@ hf download nativ-community/MiniCPM-OCR-Jev-4bit --local-dir models/MiniCPM-OCR-
 # 识别
 pixi run -e mlx ocr-run page.png -e minicpm-ocr --model minicpm-ocr=models/MiniCPM-OCR-1.0
 
-# 识别 + 可信度打分（整页分数写进 metadata.qc.jev）
-pixi run -e mlx ocr-qc page.png -e glm-ocr \
-    --jev-model models/MiniCPM-OCR-Jev --threshold 0.5
+# 识别 + 可信度打分（整页分数写进 metadata.qc.jev，不给阈值就只出分数）
+pixi run -e mlx ocr-qc page.png -e glm-ocr --jev-model models/MiniCPM-OCR-Jev
 
 # 直接对比 GLM-OCR 与 MiniCPM-OCR
 pixi run -e mlx ocr-run page.png -e glm-ocr -e minicpm-ocr -o markdown
@@ -230,16 +231,24 @@ info = apply_qc(result, "page.png", JevScorer("models/MiniCPM-OCR-Jev"), thresho
 print(info["prob_consistent"], info["needs_review"])
 ```
 
-三点使用约束（都会直接影响结论，别跳过）：
+四点使用约束（都会直接影响结论，别跳过）：
 
-1. **阈值必须自己标定。** Jev 的分数对渲染字体/行距敏感，官方也没给通用默认
-   阈值；`qc.py` 用 Pillow 做确定性渲染（固定字体、字号、行距），所以分数只能
-   在本仓库自己的渲染器下前后自比。4bit 权重与 bf16 的最大概率差 0.073。
-2. **`qc` 只做整页打分。** VLM 引擎的 `OCRResult` 没有逐块 bbox，切块打分需要
+1. **绝对分数不能当闸门，只能同块排序。** M4 Pro 实测：完全正确的识别结果整页
+   只有 **0.0316**、表格块 **0.199**；改错一个数字掉到 0.00003、多重复一行 0.007。
+   区分度有 2~4 个数量级，但「对的」也只有 0.03~0.2，任何固定 0.5 阈值都会把正确
+   结果全拦下。主因是 `qc.py` 用 Pillow 把纯文本画成图，丢了表格边框和列对齐，
+   而 Jev 比的是版式 + 字符。要当闸门，先换 HTML/Chromium 渲染再按业务样本标定分位阈值。
+2. **阈值必须自己标定。** 即使换成高保真渲染，分数也依赖字体/版本，官方明确说
+   没有通用默认阈值；4bit 与 bf16 的最大概率差还有 0.073。
+3. **整页长边压到 ~1200px。** 1240×1500 的整页会在同一行表格上无限重复输出，
+   1240×1200 和 930×1125 都正常。官方 `mlx_vlm.generate` 命令行同样复现，属模型侧
+   输入尺寸相关的解码退化，不是适配层写法问题。
+4. **`qc` 只做整页打分。** VLM 引擎的 `OCRResult` 没有逐块 bbox，切块打分需要
    版面分析结果（`patent_table_mlx` 的 regions 带 box，可自行 crop 后调
-   `JevScorer.score(crop, text)`）。整页分数是粗信号，不能逐块定罪。
-3. **Jev 不能当生成模型用。** 它没有 `lm_head`，只输出 `[2, 2048]` 打分头结果，
-   所以不进 `start_ocr_task` 的模型路由，走 `qc` 子命令或 `JevScorer`。
+   `JevScorer.score(crop, text)`）。
+
+另外：**Jev 不能当生成模型用**。它没有 `lm_head`，只输出 `[2, 2048]` 打分头结果，
+所以不进 `start_ocr_task` 的模型路由，只走 `qc` 子命令或 `JevScorer`。
 
 ### PDF 批量识别（专利/文献）
 

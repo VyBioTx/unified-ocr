@@ -44,7 +44,11 @@ unified-ocr = { path = ".", editable = true }
 mlx = ">=0.19"
 mlx-lm = ">=0.19"
 transformers = ">=5.0"
-mlx-vlm = { git = "https://github.com/Blaizzy/mlx-vlm.git", rev = "main" }
+# rev 钉在 4a991d7（0.7.11）而不是 main：这是首个含 minicpm_ocr /
+# minicpm_ocr_jev 移植的版本。跟 main 走时 pixi.lock 会静默停在旧 commit，
+# 装出来的环境直接报 "Model type minicpm_ocr not supported"。
+# 升级 rev 后需在 macOS 上执行一次 `pixi install -e mlx` 重新生成 pixi.lock。
+mlx-vlm = { git = "https://github.com/Blaizzy/mlx-vlm.git", rev = "4a991d7f" }
 
 # ---------------------------------------------------------------------------
 # HunyuanOCR 引擎（transformers 原生推理，Apple Silicon 走 MPS）

@@ -130,3 +130,26 @@ def test_cli_qc_prints_scores(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "jev=0.80000" in out
     assert "needs_review=None" in out
+
+
+def test_stale_mlx_vlm_load_error_is_actionable(tmp_path, monkeypatch):
+    """旧版 mlx-vlm：加载报 Model type not supported，提示要指名 pixi 命令。"""
+    mlx = types.ModuleType("mlx_vlm")
+
+    def fake_load(path):
+        raise ValueError("Model type minicpm_ocr not supported.")
+
+    mlx.load = fake_load
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx)
+
+    with pytest.raises(RuntimeError, match="pixi update mlx-vlm -e mlx"):
+        registry.create_backend("minicpm-ocr").recognize(tmp_path / "page.png")
+
+
+def test_stale_mlx_vlm_score_error_is_actionable(tmp_path, monkeypatch):
+    """旧版 mlx-vlm：没有 minicpm_ocr_jev 子模块，报错要能直接看懂。"""
+    _install_fake_mlx_vlm(monkeypatch)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.models.minicpm_ocr_jev", None)
+
+    with pytest.raises(RuntimeError, match="pixi update mlx-vlm -e mlx"):
+        JevScorer().score(tmp_path / "crop.png", MARKDOWN)

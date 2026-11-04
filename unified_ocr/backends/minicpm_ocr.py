@@ -29,6 +29,13 @@ log = logging.getLogger(__name__)
 #: 上游模型卡给的示例提示词（英文训练语料）。
 DEFAULT_PROMPT = "Convert this page to markdown."
 
+#: mlx-vlm 太旧（不含 minicpm_ocr 移植）时的统一提示。
+STALE_MLX_VLM_HINT = (
+    "当前 mlx-vlm 不含 minicpm_ocr 移植。请在 macOS 上执行 "
+    "`pixi update mlx-vlm -e mlx`（或 `pixi install -e mlx`）更新锁并重装；"
+    "需要 mlx-vlm >= 0.7.11。"
+)
+
 
 @register
 class MiniCPMOcrMLXBackend(OCRBackend):
@@ -71,7 +78,12 @@ class MiniCPMOcrMLXBackend(OCRBackend):
                 "（mlx-vlm 需从 git 主分支安装，PyPI 版尚未内置 minicpm_ocr 架构）"
             ) from exc
         log.info("加载 MiniCPM-OCR %s（首次运行会下载权重）", self.model)
-        self._model, self._processor = load(self.model)
+        try:
+            self._model, self._processor = load(self.model)
+        except (ValueError, KeyError, ImportError) as exc:
+            # 旧版 mlx-vlm 会抛 "Model type minicpm_ocr not supported" 或
+            # "No module named 'mlx_vlm.speculative.drafters.minicpm_ocr'"。
+            raise RuntimeError(f"{STALE_MLX_VLM_HINT}\n原因: {exc}") from exc
         return super().load()
 
     def close(self) -> None:

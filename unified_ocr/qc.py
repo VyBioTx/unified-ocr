@@ -163,7 +163,15 @@ class JevScorer:
         if not text or not text.strip():
             return {"prob_consistent": None, "reason": "empty text", "model": self.model}
         self.load()
-        from mlx_vlm.models.minicpm_ocr_jev import score as jev_score  # type: ignore
+        try:
+            from mlx_vlm.models.minicpm_ocr_jev import score as jev_score  # type: ignore
+        except ImportError as exc:
+            # 旧版 mlx-vlm 没有这个子模块，别让用户去查 "speculative drafters"。
+            raise RuntimeError(
+                "当前 mlx-vlm 不含 minicpm_ocr_jev 移植。请在 macOS 上执行 "
+                "`pixi update mlx-vlm -e mlx`（或 `pixi install -e mlx`）；"
+                "需要 mlx-vlm >= 0.7.11。"
+            ) from exc
 
         render = rendered or render_candidate(
             text, width=self.render_width, font_size=self.font_size
