@@ -152,6 +152,12 @@ patent-mlx-pdf = "python -m unified_ocr.patent_table_mlx.cli pdf"
 patent-mlx-layout-run = "python -m unified_ocr.patent_table_mlx.cli run --layout"
 patent-mlx-layout-pdf = "python -m unified_ocr.patent_table_mlx.cli pdf --layout"
 
+# 单页识别 / Jev 可信度打分（mlx 环境），附加参数直接跟在任务名后：
+#   pixi run -e mlx ocr-run page.png -e minicpm-ocr
+#   pixi run -e mlx ocr-qc  page.png -e glm-ocr --threshold 0.5
+ocr-run = "unified-ocr run"
+ocr-qc = "unified-ocr qc"
+
 # MCP server 任务（需 mcp 环境，模型引擎依赖 mlx/hunyuan 一并装入）
 [feature.mcp.tasks]
 mcp = "python mcp_server/server.py"

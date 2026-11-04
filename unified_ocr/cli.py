@@ -7,6 +7,7 @@
     unified-ocr run scan.png --all -o json
     unified-ocr run scan.png -e hunyuanocr \\
         --model hunyuanocr=~/models/HunyuanOCR
+    unified-ocr qc scan.png -e glm-ocr --threshold 0.5
 """
 
 from __future__ import annotations
@@ -49,6 +50,17 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="覆盖某引擎的模型路径，如 --model glm-ocr=mlx-community/GLM-OCR-bf16")
     r.add_argument("--prompt", default=None, help="覆盖默认识别提示词")
     r.add_argument("--max-tokens", type=int, default=None)
+
+    # --- qc（OCR + Jev 可信度打分）----------------------------------------
+    q = sub.add_parser("qc", help="识别一页并给出 Jev 可信度分数")
+    q.add_argument("image", help="图像路径")
+    q.add_argument("-e", "--engine", default="glm-ocr", help="识别引擎 id（默认 glm-ocr）")
+    q.add_argument("-o", "--output", choices=["json", "text"], default="json")
+    q.add_argument("--model", default=None, metavar="ENGINE=PATH",
+                   help="覆盖识别引擎的模型路径")
+    q.add_argument("--jev-model", default=None, help="Jev 权重路径 / HF id")
+    q.add_argument("--threshold", type=float, default=None,
+                   help="低于该分数标记 needs_review（需按自己样本标定）")
     return p
 
 
@@ -119,6 +131,33 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _qc(args: argparse.Namespace) -> int:
+    """单页 OCR + Jev 打分；整页分数写入 result.metadata['qc']['jev']。"""
+    from .qc import JevScorer, apply_qc
+
+    opts: dict[str, Any] = {}
+    if args.model:
+        models = _parse_kv([args.model], "--model")
+        if args.engine in models:
+            opts["model"] = models[args.engine]
+    try:
+        backend = create_backend(args.engine, **opts)
+        with backend:
+            result = backend.recognize(args.image)
+    except Exception as exc:  # noqa: BLE001 - CLI 需要兜底报错
+        print(f"引擎 {args.engine} 识别失败: {exc}", file=sys.stderr)
+        return 1
+
+    info = apply_qc(result, args.image, JevScorer(args.jev_model), args.threshold)
+    if args.output == "text":
+        prob = info["prob_consistent"]
+        print(f"engine={result.engine} jev={prob if prob is None else f'{prob:.5f}'} "
+              f"threshold={info['threshold']} needs_review={info['needs_review']}")
+    else:
+        print(result.to_json())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
@@ -139,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "run":
         return _run(args)
+    if args.command == "qc":
+        return _qc(args)
     return 1  # pragma: no cover - parser required=True 已拦截
 
 
