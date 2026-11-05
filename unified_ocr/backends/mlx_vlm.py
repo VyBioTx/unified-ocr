@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..base import EngineSpec, OCRBackend
+from ..base import EngineSpec, OCRBackend, generation_text
 from ..models import OCRResult
 from ..registry import register
 
@@ -86,8 +86,6 @@ class MLXVLMBackend(OCRBackend):
 
         options 可覆盖 prompt / max_tokens。
         """
-        from mlx_vlm import generate  # type: ignore  (load() 已保证依赖存在)
-
         if not self._loaded:
             self.load()
 
@@ -96,6 +94,7 @@ class MLXVLMBackend(OCRBackend):
         if options:
             log.warning("未能识别的选项被忽略: %s", sorted(options))
 
+        # 本地适配：GLM-OCR 需要手工拼 prompt/像素输入，见 _run_generate
         text = self._run_generate(str(image), prompt, int(max_tokens))
         return OCRResult.from_text(
             engine=self.spec.id,
@@ -136,7 +135,8 @@ class MLXVLMBackend(OCRBackend):
                 image=image_path,
                 max_tokens=max_tokens,
             )
-        return res.text if hasattr(res, "text") else str(res)
+        # mlx-vlm 新版返回 GenerationResult(.text)，旧版直接返回 str
+        return generation_text(res)
 
     def _build_glm_prompt(self, user_text: str) -> str:
         """GLM-OCR 对话模板：固定 begin/end 图像块包裹占位符 + 用户指令 + assistant 结尾。"""

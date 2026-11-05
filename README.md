@@ -6,6 +6,7 @@
 |------|----------|----------|--------------|
 | `glm-ocr` | [zai-org/GLM-OCR](https://github.com/zai-org/GLM-OCR)（代码 Apache-2.0 / 模型 MIT） | **mlx-vlm（MLX/Metal）** | ✅ 官方提供 MLX 部署指南 |
 | `paddleocr-vl` | [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)（Apache-2.0） | **mlx-vlm（MLX/Metal）** | ✅ mlx-vlm 原生集成 |
+| `minicpm-ocr` | [OpenBMB/MiniCPM-OCR](https://github.com/OpenBMB/MiniCPM-OCR)（Apache-2.0） | **mlx-vlm（MLX/Metal）** | ✅ mlx-vlm 已内置 `minicpm_ocr` 架构 |
 | `hunyuanocr` | [Tencent-Hunyuan/HunyuanOCR](https://github.com/Tencent-Hunyuan/HunyuanOCR)（v1.0 分支） | **transformers 原生推理（MPS）** | ✅ 1B 参数，PyTorch MPS 可跑 |
 | `dots-mocr` | [rednote-hilab/dots.mocr](https://github.com/rednote-hilab/dots.mocr)（原 dots.ocr，自定义许可） | **transformers 原生推理（MPS/CPU）** | ✅ 1.7B VLM，eager attention 免 flash-attn，MPS 可跑 |
 | `dots-mocr-mlx` | 同上 | **mlx-vlm（MLX/Metal）** | ⚠️ 注册已就绪；dots.vit（NaViT）架构 mlx-vlm 尚未支持，见[下文](#dotsmocr--mlx-状态) |
@@ -48,6 +49,8 @@ pixi run list-engines
 pixi install -e mlx
 #   注意：mlx-vlm 必须从 git 安装（PyPI 版尚未内置 GLM-OCR / PaddleOCR-VL 架构），
 #   且要求 transformers>=5.0。
+#   pixi.toml 里 mlx-vlm 的 rev 钉在 0.7.11（含 minicpm_ocr / minicpm_ocr_jev）；
+#   改了 rev 之后 `pixi install -e mlx` 会重新生成 pixi.lock —— 在 macOS 上跑一次并提交。
 
 # 3. HunyuanOCR 引擎（transformers 原生，可选）
 pixi install -e hunyuan   # torch + transformers + accelerate
@@ -121,20 +124,34 @@ pixi run -e mcp mcp
 - `MAX_OCR_PARALLEL` — 并行 OCR 任务数上限（默认 `1`；内置任务队列，批量识别按此并发执行）
 - `MCP_UPLOAD_DIR` / `MCP_RESULT_DIR` — 上传 / 结果目录（默认 `<repo>/data/uploads|results`）
 - `MCP_PUBLIC_BASE_URL` — 生成下载链接用的外部地址（默认 `http://localhost:8802`）
+- `MCP_MODEL_CONFIG` — 服务端模型配置文件路径（默认 `<repo>/mcp_server/models.json`）
 
 MCP 工具与调用流程（图片 / PDF 均可，输出为**去 bbox 的标准 Markdown**）：
 
-1. `upload_instructions()` — 获取上传地址与格式，同时列出可用模型
+1. `upload_instructions()` — 获取上传地址与格式，同时列出可用模型**名称**
 2. `POST /upload`（multipart 字段 `file`）→ 返回 `file_id`
 3. `start_ocr_task(file_id, model=..., max_tokens=...)` — 提交识别任务 → 返回 `task_id`
 4. `get_task_status(task_id)` — 轮询进度；`done` 后返回 `result.download_url` 下载结果
 5. `list_tasks()` / `model_status()` — 任务列表 / 模型加载状态
 
-**`model` 参数**（`start_ocr_task`，默认 `glm-ocr`）：
+**`model` 参数**（`start_ocr_task`，默认取配置里的 `default_model`）：
 
-- 引擎 id：`glm-ocr`（默认）/ `paddleocr-vl` / `hunyuanocr`
-- 指定路径：`engine=path`，如 `glm-ocr=./models/GLM-OCR`、`hunyuanocr=./models/HunyuanOCR`
-- 裸路径 / HF id：如 `mlx-community/GLM-OCR-bf16`（按目录名前缀自动推断引擎）
+- 只接受**服务端配置中已声明的模型名称**（如 `glm-ocr` / `paddleocr-vl` / `hunyuanocr`）。
+- 客户端传路径、HF id 或 `engine=path` 一律拒绝（返回 `error` + `allowed_models`），避免暴露服务器目录结构。
+- 模型名称 → 引擎 + 权重路径的映射集中在服务端 `mcp_server/models.json`：
+
+```json
+{
+  "default_model": "glm-ocr",
+  "models": {
+    "glm-ocr":      { "engine": "glm-ocr",      "path": "models/GLM-OCR" },
+    "paddleocr-vl": { "engine": "paddleocr-vl", "path": "models/PaddleOCR-VL" },
+    "hunyuanocr":   { "engine": "hunyuanocr",   "path": "models/HunyuanOCR" }
+  }
+}
+```
+
+`path` 可省略（用后端默认权重）；相对路径在仓库根下存在时按仓库根解析，否则原样透传（如 HF repo id）；也可用 `MCP_MODEL_CONFIG` 指向自定义配置。
 
 每个 model 首次使用时懒加载并缓存（同一进程内切换模型不会重复加载权重）；推理通过单一锁串行化，避免多个大模型并发占用 Metal GPU。
 
@@ -178,6 +195,61 @@ python run_hunyuan_ocr.py ./models/HunyuanOCR ./page.png 4096
 unified-ocr run page.png -e dots-mocr --model dots-mocr=./weights/DotsMOCR
 ```
 
+### MiniCPM-OCR 1.0（MLX）+ Jev 可信度打分
+
+`minicpm-ocr` 引擎走 mlx-vlm 的 `minicpm_ocr` 移植（视觉塔 SigLIP + Qwen3.5
+24 层混合注意力主干），和 `glm-ocr` 是同一套加载/生成路径，切换只改引擎 id。
+`unified-ocr qc` 在此之上接 MiniCPM-OCR Jev —— 输出可信度而非文本的判别模型。
+
+| 组件 | 权重（MLX） | 体积 | 说明 |
+|------|-------------|------|------|
+| 解析 MiniCPM-OCR 1.0 | `nativ-community/MiniCPM-OCR-1.0-bf16` | 2.60 GB | **默认**；4bit 版 `-4bit` 2.16 GB 只省 0.44 GB |
+| 解析 4bit | `nativ-community/MiniCPM-OCR-1.0-4bit` | 2.16 GB | 只量化 96 个线性层，密集页字符相似度 0.76~0.83 |
+| 质检 Jev | `nativ-community/MiniCPM-OCR-Jev-4bit` | 1.72 GB | bf16 版 4.43 GB，量化收益大 |
+
+```bash
+# 权重（走 hf-mirror 时加 HF_ENDPOINT=https://hf-mirror.com）
+hf download nativ-community/MiniCPM-OCR-1.0-bf16 --local-dir models/MiniCPM-OCR-1.0
+hf download nativ-community/MiniCPM-OCR-Jev-4bit --local-dir models/MiniCPM-OCR-Jev
+
+# 识别
+pixi run -e mlx ocr-run page.png -e minicpm-ocr --model minicpm-ocr=models/MiniCPM-OCR-1.0
+
+# 识别 + 可信度打分（整页分数写进 metadata.qc.jev，不给阈值就只出分数）
+pixi run -e mlx ocr-qc page.png -e glm-ocr --jev-model models/MiniCPM-OCR-Jev
+
+# 直接对比 GLM-OCR 与 MiniCPM-OCR
+pixi run -e mlx ocr-run page.png -e glm-ocr -e minicpm-ocr -o markdown
+```
+
+```python
+from unified_ocr import OCR
+from unified_ocr.qc import JevScorer, apply_qc
+
+result = OCR().run("page.png", engines=["minicpm-ocr"])[0]
+info = apply_qc(result, "page.png", JevScorer("models/MiniCPM-OCR-Jev"), threshold=0.5)
+print(info["prob_consistent"], info["needs_review"])
+```
+
+四点使用约束（都会直接影响结论，别跳过）：
+
+1. **绝对分数不能当闸门，只能同块排序。** M4 Pro 实测：完全正确的识别结果整页
+   只有 **0.0316**、表格块 **0.199**；改错一个数字掉到 0.00003、多重复一行 0.007。
+   区分度有 2~4 个数量级，但「对的」也只有 0.03~0.2，任何固定 0.5 阈值都会把正确
+   结果全拦下。主因是 `qc.py` 用 Pillow 把纯文本画成图，丢了表格边框和列对齐，
+   而 Jev 比的是版式 + 字符。要当闸门，先换 HTML/Chromium 渲染再按业务样本标定分位阈值。
+2. **阈值必须自己标定。** 即使换成高保真渲染，分数也依赖字体/版本，官方明确说
+   没有通用默认阈值；4bit 与 bf16 的最大概率差还有 0.073。
+3. **整页长边压到 ~1200px。** 1240×1500 的整页会在同一行表格上无限重复输出，
+   1240×1200 和 930×1125 都正常。官方 `mlx_vlm.generate` 命令行同样复现，属模型侧
+   输入尺寸相关的解码退化，不是适配层写法问题。
+4. **`qc` 只做整页打分。** VLM 引擎的 `OCRResult` 没有逐块 bbox，切块打分需要
+   版面分析结果（`patent_table_mlx` 的 regions 带 box，可自行 crop 后调
+   `JevScorer.score(crop, text)`）。
+
+另外：**Jev 不能当生成模型用**。它没有 `lm_head`，只输出 `[2, 2048]` 打分头结果，
+所以不进 `start_ocr_task` 的模型路由，只走 `qc` 子命令或 `JevScorer`。
+
 ### PDF 批量识别（专利/文献）
 
 ```bash
@@ -190,6 +262,172 @@ python batch_hunyuan_ocr.py            # → result_hunyuanocr.md（表格 HTML 
 ```
 
 > 三个引擎同时跑会触发 Metal GPU 超时（M4 Pro 实测），需顺序执行。
+
+### 专利表格 OCR（PP-StructureV3 专用链）
+
+`unified_ocr/patent_table` 模块按论文（FENNEC 2026, Methods → Data curation）
+配置 **PP-StructureV3** 流水线，从专利 PDF 中抽取 siRNA 序列表与敲低效应表。
+流水线由 PaddleX 实现：`PP-DocLayout_plus-L` 版面分析 + `PP-OCRv5` 整页 OCR
++ `RT-DETR-L` 表格单元格检测 + `SLANeXt` 表格结构识别，按论文参数运行
+（`det_limit_side_len=3000`、`thresh=0.15`、`box_thresh=0.4`、
+`unclip_ratio=1.5~2.0`、`lang=en`）。
+
+> 与论文「只出表格」的差异：`PPStructureV3` 完整输出**整页 markdown**（正文
+> 段落 + 表格 HTML），正文来自版面分析标记的 text 块 + 全页 OCR；只想要表格时
+> 消费 `PageResult.tables`（来自 `table_res_list`）即可。
+
+**安装（pixi，macOS）**：
+
+```bash
+# CPU（macOS Apple Silicon）
+pixi run -e patent patent-pdf patent.pdf -o result/
+```
+
+**安装（pip）**：
+
+```bash
+pip install -e ".[patent]"         # CPU
+pip install -e ".[patent-gpu]"     # Linux GPU（paddlepaddle-gpu 3.3.1）
+
+# GPU 运行（Linux + NVIDIA CUDA，实测 RTX 3060 每页 ~2-4s，较 CPU 快约 40 倍）
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300
+```
+
+**CLI 用法**：
+
+```bash
+# 单页图像 → 整页 markdown + 表格 HTML（JSON）
+python -m unified_ocr.patent_table run page.png -o page.json --device gpu:0
+
+# PDF 逐页批量（GPU 推荐）：每页一个 JSON + summary.json
+python -m unified_ocr.patent_table pdf patent.pdf -o result/ \
+    --device gpu:0 --dpi 300 --unclip 2.0
+
+# 完整流程：识别 → 解析 → QC 过滤 → 序列×效应合并
+python -m unified_ocr.patent_table full page.png -o patent_result.json --device gpu:0
+```
+
+**Python API**：
+
+```python
+from unified_ocr.patent_table import PatentTablePipeline, PatentTablePipelineConfig
+
+pipe = PatentTablePipeline(PatentTablePipelineConfig(device="gpu:0"))
+try:
+    page = pipe.process_page("page_02.png")
+    print(page.markdown)       # 整页 markdown（正文 + 表格）
+    for html in page.tables:   # 每张表的 HTML（含 rowspan/colspan）
+        print(html)
+finally:
+    pipe.close()
+```
+
+**依赖说明**：paddlepaddle-gpu 3.3.1 不在 PyPI（PyPI 仅到 2.6.2），
+`patent-gpu` 特性通过 Paddle 官方 cu126 源安装
+（`https://www.paddlepaddle.org.cn/packages/stable/cu126/`）。
+GPU 推理显存约需 8GB（全模型 + 3000px 大图），显存紧张时
+传 `--gpu-mem-mb 5500` 或 `PatentTablePipelineConfig(gpu_memory_limit_mb=...)` 限制。
+
+### MLX 原生 SLANeXt（macOS Metal，ppocr-mlx 权重）
+
+除 PaddleX 路径外，`unified_ocr/patent_table_mlx` 提供了 **SLANeXt 表格结构识别**
+的纯 MLX 实现，直接加载 `plaincompute/ppocr-mlx` 的 MLX 权重
+（`model.mlx.safetensors`，官方 PaddleX 权重的 MLX 转换），在 Apple Silicon
+的 Metal GPU 上运行，无需 Paddle/PaddleX。
+
+- 参数名与 ppocr-mlx safetensors 键一一对应，权重按键直接加载（`strict=True`
+  会在任何键/形状不匹配时报错）。
+- 已在 M4 Pro 上与 PaddleX 官方 `SLANeXt_wired` 逐 token 对齐验证：
+  同一输入下 183/183 结构 token 一致，解码出的表格 HTML 与 PaddleX **逐字节相同**。
+- 完整流水线所需的其余模块（版面分析、文本检测/识别、表格单元格检测）在
+  ppocr-mlx 中对应 `doclayoutv3/`、`det/`、`rec/`、`en_rec/`、
+  `table_cell_wired/` 等目录。
+
+```bash
+# 下载全部 ppocr-mlx 权重（约 3.8 GB，HuggingFace 可达时）
+python -c "from huggingface_hub import snapshot_download; \
+    snapshot_download('plaincompute/ppocr-mlx', local_dir='models/ppocr-mlx')"
+```
+
+```python
+import mlx.core as mx
+from unified_ocr.patent_table_mlx import load_slanext, decode_structure
+from unified_ocr.patent_table_mlx.preprocess import preprocess_image
+
+model = load_slanext("models/ppocr-mlx/table_wired")
+x = preprocess_image("table.png")                 # CHW 3x512x512 (BGR, PaddleX 同款预处理)
+probs = model(mx.array(x[None]))                  # [1, seq, 50]
+ids = [int(v) for v in mx.argmax(probs[0], axis=-1)]
+print(decode_structure(ids))                      # <html><body><table>…</table></body></html>
+```
+
+> 依赖：`pixi run -e mlx …`（mlx / mlx-lm / mlx-vlm）。测试：`pixi run -e mlx-test pytest tests/test_patent_table_mlx.py`
+> （无 MLX 的环境会自动 skip 该模块）。
+
+#### 全文档模式（表格 + 非表格内容）
+
+`PatentTableMLXPipeline` 除**只出表格**外，还支持**全文档模式**：用同一套版面分析
+定位页面上的所有区域，表格区域走上面的表格链，其余区域（`doc_title` /
+`paragraph_title` / `text` / `figure_title` / `formula` / `image` / `chart` 等）
+经检测+识别后按阅读顺序渲染为 Markdown，最终拼成一整篇文档。
+
+- 阅读顺序：移植 PaddleX `sorted_layout_boxes`，支持单栏/双栏版面。
+- 文本合并：同一区域内按行读取，行距小用空格、行距大（新段落）用换行。
+- 标签映射：标题→`#`/`##`，图注→粗体，公式/图→占位（`[formula]`/`[image]`）。
+- 忽略标签默认与 PP-StructureV3 一致：`number / footnote / header / footer /
+  header_image / footer_image / aside_text`（可用 `markdown_ignore_labels` 覆盖）。
+
+```bash
+# 整份 PDF → 全文档 Markdown（表格 + 正文/标题/图注）
+pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+
+# 单页图像 → 全文档
+pixi run -e mlx-patent patent-mlx-layout-run page_02.png -o out/
+
+# 表格模式仍是默认（向后兼容）
+pixi run -e mlx-patent patent-mlx-pdf patent.pdf -o out/
+```
+
+```python
+from unified_ocr.patent_table_mlx import PatentTableMLXPipeline, PatentPipelineMLXConfig
+
+pipe = PatentTableMLXPipeline(PatentPipelineMLXConfig(device="cpu"))
+try:
+    regions = pipe.process_image_layout("page_02.png")   # 表格 + 非表格区域
+    print(PatentTableMLXPipeline.document_markdown(regions))
+
+    # 也可整份 PDF：
+    # regions = pipe.process_pdf_layout("patent.pdf")
+finally:
+    pipe.close()
+```
+
+输出：`*.mlx_layout.json`（每个区域的 `label` / `kind` / `markdown` / `box`，
+表格区域额外含 `html` / `n_cells`）与 `*.mlx_layout.md`（拼好的整篇文档）。
+
+> **识别语言（自动判断）**：默认 `--rec-lang auto`。流水线会先判断文档语种，
+> 再选择识别模型：英文文档用论文的 `en_PP-OCRv4_mobile_rec`，中文/CJK 文档自动
+> 切到多语模型 `PP-OCRv5_server_rec`（英文模型会把中文正文渲染成乱码）。判断顺序：
+> 1. 先读 PDF 自带的文本层（数字版 PDF 免模型、瞬时）；
+> 2. 扫描件/图片没有文本层时，用多语识别器对前几页做一次 OCR 试探，按字符集判定。
+>
+> ```bash
+> # 默认：自动判断（中文专利 → PP-OCRv5_server_rec，英文专利 → en_PP-OCRv4_mobile_rec）
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/
+>
+> # 强制指定语言（跳过自动判断）
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang ch
+> pixi run -e mlx-patent patent-mlx-layout-pdf patent.pdf -o out/ --rec-lang en
+> ```
+>
+> 判定结果会写进输出 JSON 的 `config.detected_lang`。也可用
+> `--rec-model <name>` 直接指定识别模型（此时不再做语言判断），或用
+> `--lang-detect-pages N`（默认 3）调整自动判断采样的页数。表格结构识别
+> （MLX SLANeXt）与语言无关，不受影响。
+>
+> Python API：`pipe.resolve_language(source="patent.pdf")` 返回 `"en"` / `"ch"`，
+> 也可传 `sample_images=[...]` 对图片做试探。
 
 ### 统一框架 Python API / CLI
 

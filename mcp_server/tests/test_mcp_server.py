@@ -1,18 +1,30 @@
 """MCP server 核心逻辑的离线测试（不加载真实模型 / 不起 HTTP 服务）。
 
 覆盖:
-  - _parse_model_spec 的模型参数解析（默认 glm-ocr / engine=path / 裸路径推断）
+  - 服务端模型配置：名称解析、拒绝客户端路径、相对路径解析
   - _safe_filename 路径净化
   - 任务队列：注册 -> 运行 -> done，以及 error 路径
   - start_ocr_task / get_task_status / list_tasks 的返回结构（含 download_url）
 """
 
-import os
+import json
 from pathlib import Path
 
 import pytest
 
 import mcp_server.server as server
+
+
+def _cfg(default: str = "glm-ocr") -> tuple[str, dict]:
+    return (
+        default,
+        {
+            "glm-ocr": server.ModelEntry("glm-ocr", "glm-ocr"),
+            "paddleocr-vl": server.ModelEntry("paddleocr-vl", "paddleocr-vl"),
+            "hunyuanocr": server.ModelEntry("hunyuanocr", "hunyuanocr"),
+            "glm-ocr-local": server.ModelEntry("glm-ocr-local", "glm-ocr", "models/GLM-OCR"),
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +33,8 @@ def _isolated_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "UPLOAD_DIR", tmp_path / "uploads")
     monkeypatch.setattr(server, "RESULT_DIR", tmp_path / "results")
     monkeypatch.setattr(server, "PUBLIC_BASE_URL", "http://test:8802")
+    # 服务端模型配置固定为测试用条目（不读仓库 models.json）
+    monkeypatch.setattr(server, "_model_config_cache", _cfg())
     server.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     server.RESULT_DIR.mkdir(parents=True, exist_ok=True)
     # 每测试清空任务表与已加载后端
@@ -29,32 +43,55 @@ def _isolated_dirs(tmp_path, monkeypatch):
     yield
 
 
-def test_parse_model_spec_default():
-    engine, path = server._parse_model_spec("")
-    assert engine == "glm-ocr"
-    assert path == ""
-    engine, path = server._parse_model_spec("glm-ocr")
-    assert (engine, path) == ("glm-ocr", "")
+def test_read_model_config(tmp_path, monkeypatch):
+    cfg = tmp_path / "models.json"
+    cfg.write_text(json.dumps({
+        "default_model": "fast",
+        "models": {
+            "fast": {"engine": "glm-ocr", "path": "models/GLM-OCR"},
+            "hunyuanocr": "hunyuanocr",
+        },
+    }), encoding="utf-8")
+    default, entries = server._read_model_config(cfg)
+    assert default == "fast"
+    assert entries["fast"].engine == "glm-ocr"
+    assert entries["fast"].path == "models/GLM-OCR"
+    assert entries["hunyuanocr"].engine == "hunyuanocr"
+    assert entries["hunyuanocr"].path == ""
 
 
-def test_parse_model_spec_engine_path():
-    engine, path = server._parse_model_spec("glm-ocr=./models/GLM-OCR")
-    assert (engine, path) == ("glm-ocr", "./models/GLM-OCR")
-    engine, path = server._parse_model_spec("paddleocr-vl=PaddlePaddle/PaddleOCR-VL")
-    assert (engine, path) == ("paddleocr-vl", "PaddlePaddle/PaddleOCR-VL")
-    engine, path = server._parse_model_spec("hunyuanocr=./models/HunyuanOCR")
-    assert (engine, path) == ("hunyuanocr", "./models/HunyuanOCR")
+def test_read_model_config_missing_falls_back(tmp_path):
+    default, entries = server._read_model_config(tmp_path / "nope.json")
+    assert default
+    assert "glm-ocr" in entries
 
 
-def test_parse_model_spec_bare_path_infers_engine():
-    engine, path = server._parse_model_spec("./models/GLM-OCR")
-    assert (engine, path) == ("glm-ocr", "./models/GLM-OCR")
-    engine, path = server._parse_model_spec("mlx-community/GLM-OCR-bf16")
-    assert (engine, path) == ("glm-ocr", "mlx-community/GLM-OCR-bf16")
-    engine, path = server._parse_model_spec("PaddlePaddle/PaddleOCR-VL")
-    assert (engine, path) == ("paddleocr-vl", "PaddlePaddle/PaddleOCR-VL")
-    engine, path = server._parse_model_spec("./weights/HunyuanOCR")
-    assert (engine, path) == ("hunyuanocr", "./weights/HunyuanOCR")
+def test_resolve_model_spec_default():
+    assert server._resolve_model_spec("")[:2] == ("glm-ocr", "glm-ocr")
+    assert server._resolve_model_spec("paddleocr-vl")[:2] == ("paddleocr-vl", "paddleocr-vl")
+
+
+def test_resolve_model_spec_rejects_client_paths():
+    # 客户端只允许传配置内的模型名称，路径 / HF id / engine=path 一律拒绝
+    for bad in (
+        "glm-ocr=./models/GLM-OCR",
+        "./models/GLM-OCR",
+        "/abs/path/GLM-OCR",
+        "mlx-community/GLM-OCR-bf16",
+        "PaddlePaddle/PaddleOCR-VL",
+        "../models/HunyuanOCR",
+    ):
+        with pytest.raises(ValueError):
+            server._resolve_model_spec(bad)
+
+
+def test_resolve_model_path_relative(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "REPO_DIR", tmp_path)
+    (tmp_path / "models" / "GLM-OCR").mkdir(parents=True)
+    assert server._resolve_model_path("models/GLM-OCR") == str(tmp_path / "models" / "GLM-OCR")
+    # 不存在的相对路径（如 HF repo id）原样透传
+    assert server._resolve_model_path("mlx-community/GLM-OCR-bf16") == "mlx-community/GLM-OCR-bf16"
+    assert server._resolve_model_path("") == ""
 
 
 def test_safe_filename():
@@ -179,6 +216,11 @@ def test_start_and_status_tools(tmp_path, monkeypatch):
     assert resp["task_id"] == "task00000001"
     assert resp["model"] == "glm-ocr"
 
+    # 客户端传路径 -> 拒绝，返回允许的模型名称
+    bad = server.start_ocr_task("abc123", model="./models/GLM-OCR")
+    assert "error" in bad
+    assert "glm-ocr" in bad["allowed_models"]
+
     # 直接注入一个 done 任务验证 get_task_status 输出
     server._tasks["task00000001"] = {
         "task_id": "task00000001",
@@ -208,3 +250,14 @@ def test_list_tasks_shape():
     resp = server.list_tasks()
     assert resp["count"] == 1
     assert resp["tasks"][0]["model"] == "glm-ocr"
+
+
+def test_upload_instructions_hides_paths():
+    resp = server.upload_instructions()
+    assert resp["default_model"] == "glm-ocr"
+    names = {m["name"] for m in resp["available_models"]}
+    assert {"glm-ocr", "paddleocr-vl", "hunyuanocr"} <= names
+    # 不得向客户端暴露任何路径 / 权重位置信息
+    for m in resp["available_models"]:
+        assert "path" not in m
+        assert "model_hint" not in m
