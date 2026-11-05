@@ -30,7 +30,7 @@ from ..registry import register
 log = logging.getLogger(__name__)
 
 #: 默认识别提示词。模型为中文语料训练，中文提示更贴合。
-DEFAULT_PROMPT = "识别图片中的所有文字内容，保留原有排版结构，输出为 Markdown 格式。"
+DEFAULT_PROMPT = "请识别图片中的所有文字内容，保留原有排版结构，输出为 Markdown 格式。"
 
 
 @register
@@ -68,6 +68,12 @@ class MLXVLMBackend(OCRBackend):
             ) from exc
         log.info("加载模型 %s（首次运行会下载权重）", self.model)
         self._model, self._processor = load(self.model)
+        cfg = getattr(self._model, "config", None)
+        iti = getattr(cfg, "image_token_index", None) if cfg is not None else None
+        itid = getattr(cfg, "image_token_id", None) if cfg is not None else None
+        if cfg is not None and iti is None and itid is not None:
+            cfg.image_token_index = itid
+            log.info("补全 image_token_index=%s（取自 image_token_id）", itid)
         return super().load()
 
     def close(self) -> None:
@@ -90,19 +96,60 @@ class MLXVLMBackend(OCRBackend):
         if options:
             log.warning("未能识别的选项被忽略: %s", sorted(options))
 
-        text = generate(
-            self._model,
-            self._processor,
-            prompt,
-            image=str(image),
-            max_tokens=int(max_tokens),
-        )
+        text = self._run_generate(str(image), prompt, int(max_tokens))
         return OCRResult.from_text(
             engine=self.spec.id,
             text=text,
             model=self.model,
             prompt=prompt,
         )
+    def _run_generate(self, image_path: str, prompt: str, max_tokens: int) -> str:
+        """引擎相关多模态输入构造后推理，返回纯文本。"""
+        from mlx_vlm import generate  # type: ignore
+        model_type = getattr(getattr(self._model, "config", None), "model_type", "")
+        if model_type == "glm_ocr":
+            text = self._build_glm_prompt(prompt)
+            import numpy as np
+            import mlx.core as mx
+            proc = self._processor(images=[image_path], text=text, return_tensors="np")
+            ids = mx.array(np.asarray(proc["input_ids"], dtype=np.int32))
+            pix = mx.array(np.asarray(proc["pixel_values"], dtype=np.float32))
+            attn = mx.array(np.asarray(proc["attention_mask"], dtype=np.int32))
+            grid = mx.array(np.asarray(proc["image_grid_thw"], dtype=np.int32))
+            res = generate(
+                self._model,
+                self._processor,
+                prompt=text,
+                input_ids=ids,
+                pixel_values=pix,
+                mask=attn,
+                image_grid_thw=grid,
+                max_tokens=max_tokens,
+                verbose=False,
+            )
+        else:
+            p = prompt if "<image>" in prompt else "<image>" + prompt
+            res = generate(
+                self._model,
+                self._processor,
+                p,
+                image=image_path,
+                max_tokens=max_tokens,
+            )
+        return res.text if hasattr(res, "text") else str(res)
+
+    def _build_glm_prompt(self, user_text: str) -> str:
+        """GLM-OCR 对话模板：固定 begin/end 图像块包裹占位符 + 用户指令 + assistant 结尾。"""
+        user_text = (user_text or "").replace("<image>", "").strip()
+        if not user_text:
+            user_text = "请识别图片中的所有文字内容，保留原有排版结构，输出为 Markdown 格式。"
+        return (
+            "[gMASK]<sop><|user|>\n"
+            "<|begin_of_image|><|image|><|end_of_image|>\n"
+            + user_text
+            + "<|assistant|>"
+        )
+
 
 
 # ---------------------------------------------------------------------------

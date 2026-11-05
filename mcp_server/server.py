@@ -72,7 +72,7 @@ PUBLIC_BASE_URL = os.environ.get(
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".pdf"}
 MAX_UPLOAD_BYTES = int(os.environ.get("MCP_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 
-DEFAULT_MODEL = "glm-ocr"
+DEFAULT_MODEL = "glm-ocr=./models/GLM-OCR"
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
